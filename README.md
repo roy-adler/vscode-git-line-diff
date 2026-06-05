@@ -19,13 +19,19 @@ documents.
 
 - **Custom Source Control view** (`GitLineDiff`) listing changed files.
 - **JSON pretty-printing** out of the box (`JSON.stringify(JSON.parse(x), null, 2)`).
+- **Embedded-JSON expansion** — pretty-prints single-line JSON stored *inside*
+  another file, such as a YAML value `attributeValue: '{"a":1,...}'`.
+- **Configurable** — control file types, and which keys/patterns to expand,
+  through VS Code settings (see [Configuration](#configuration)).
 - **In-memory only** — uses VS Code virtual documents; originals are untouched.
 - **Extensible formatter registry** — add XML, YAML, TOML, or custom formats
   with a few lines of code.
-- **Auto-refresh** — the view and any open diffs update when the repo changes.
+- **Auto-refresh** — the view and open diffs update when the repo *or* the
+  settings change.
 
-Initially the view shows only `*.json` files (the formats most commonly stored
-on a single line). See [Adding a formatter](#adding-a-formatter) to widen this.
+The view lists **all** changed files in the working tree. Files with a matching
+formatter are annotated (e.g. `config.yaml · embedded-json`) and open as a
+pretty diff; files without one open as an ordinary diff.
 
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs
@@ -76,6 +82,61 @@ Requirements: Node.js 18+, VS Code 1.85+. The built-in Git extension
 
 ---
 
+## Configuration
+
+All settings live under the `gitlinediff.*` namespace and update the view and
+any open diffs live.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `gitlinediff.json.fileExtensions` | `["json"]` | Extensions treated as standalone JSON and pretty-printed. |
+| `gitlinediff.embeddedJson.enabled` | `true` | Expand single-line JSON strings embedded inside other files. |
+| `gitlinediff.embeddedJson.fileExtensions` | `["yaml", "yml"]` | Extensions scanned for embedded JSON values. |
+| `gitlinediff.embeddedJson.autoDetect` | `true` | When no `keys`/`keyPattern` are set, expand any value that parses as a JSON object/array. |
+| `gitlinediff.embeddedJson.keys` | `[]` | Restrict expansion to these exact key names. |
+| `gitlinediff.embeddedJson.keyPattern` | `""` | Optional regex matched against key names. |
+
+**Eligibility rule for embedded JSON:** a value is expanded only if it parses as
+a JSON object/array **and** its key is eligible. A key is eligible if `keys`
+contains it or `keyPattern` matches it; if neither is configured, `autoDetect`
+makes every key eligible.
+
+### Example
+
+Given this YAML in the working tree (a real, single-line value):
+
+```yaml
+metadata:
+  name: demo
+  attributeValue: '{"a":1,"b":{"c":2},"d":[1,2]}'
+```
+
+GitLineDiff renders the diff side as:
+
+```yaml
+metadata:
+  name: demo
+  attributeValue: |-
+    {
+      "a": 1,
+      "b": {
+        "c": 2
+      },
+      "d": [
+        1,
+        2
+      ]
+    }
+```
+
+Only the matched value line is rewritten (as a YAML block scalar); every other
+line is preserved exactly, so the diff stays focused on what actually changed.
+To expand only specific keys, set:
+
+```jsonc
+"gitlinediff.embeddedJson.keys": ["attributeValue"]
+```
+
 ## How it works
 
 1. **Git integration** (`src/gitApi.ts`)
@@ -84,9 +145,9 @@ Requirements: Node.js 18+, VS Code 1.85+. The built-in Git extension
    `HEAD` (via `Repository.show('HEAD', path)`).
 
 2. **Source Control view** (`src/treeView.ts`)
-   A `TreeDataProvider` populates the `gitLineDiffView` view with changed files
-   that pass a filter (JSON only by default). Selecting an item runs the
-   `gitlinediff.openDiff` command.
+   A `TreeDataProvider` populates the `gitLineDiffView` view with the working
+   tree's changed files, annotating each with the formatter that applies (if
+   any). Selecting an item runs the `gitlinediff.openDiff` command.
 
 3. **Virtual documents** (`src/extension.ts`)
    A `TextDocumentContentProvider` registered for the custom `gitlinediff`
@@ -118,11 +179,12 @@ Requirements: Node.js 18+, VS Code 1.85+. The built-in Git extension
 
 ```
 src/
-├── extension.ts          Activation, virtual-document provider, commands
+├── extension.ts          Activation, virtual-document provider, commands, config wiring
+├── config.ts             Typed reader for gitlinediff.* settings
 ├── gitApi.ts             Typed wrapper around the built-in Git extension
 ├── git.d.ts              Vendored, minimal type declarations for vscode.git
-├── treeView.ts           Source Control TreeDataProvider + file filter
-└── formatterRegistry.ts  Pluggable content formatters (JSON built in)
+├── treeView.ts           Source Control TreeDataProvider + formatter annotation
+└── formatterRegistry.ts  Pluggable formatters (JSON + embedded-JSON), built from config
 ```
 
 Design principles:

@@ -93,25 +93,177 @@ export class FormatterRegistry {
 }
 
 /**
- * JSON formatter: re-serialises minified/single-line JSON with two-space
- * indentation. Falls back to the original content on parse failure so that
- * partial or non-standard JSON still diffs.
+ * Creates a JSON formatter that re-serialises minified/single-line JSON with
+ * two-space indentation. Falls back to the original content on parse failure so
+ * that partial or non-standard JSON still diffs.
+ *
+ * @param extensions Extensions (no leading dot) this formatter handles.
  */
-export const jsonFormatter: Formatter = {
-  id: 'json',
-  extensions: ['json'],
-  format: (content: string): string => {
-    try {
-      return JSON.stringify(JSON.parse(content), null, 2);
-    } catch {
-      // Malformed JSON — show it verbatim rather than failing the diff.
-      return content;
-    }
-  },
-};
+export function createJsonFormatter(extensions: readonly string[]): Formatter {
+  return {
+    id: 'json',
+    extensions,
+    format: (content: string): string => {
+      try {
+        return JSON.stringify(JSON.parse(content), null, 2);
+      } catch {
+        // Malformed JSON — show it verbatim rather than failing the diff.
+        return content;
+      }
+    },
+  };
+}
+
+/** Options controlling which embedded JSON string values get expanded. */
+export interface EmbeddedJsonOptions {
+  readonly extensions: readonly string[];
+  /** Expand any eligible key when no explicit keys/pattern are configured. */
+  readonly autoDetect: boolean;
+  /** Exact key names to expand. */
+  readonly keys: readonly string[];
+  /** Optional regex (string form) matched against key names. */
+  readonly keyPattern: string;
+}
 
 /**
- * Creates a registry pre-populated with the built-in formatters.
+ * Matches a single YAML mapping entry whose value is a quoted scalar, e.g.
+ *   `  attributeValue: '{"a":1}'`
+ *   `- attributeValue: "{\"a\":1}"`
+ * Captures: (1) indentation, (2) key, (3) quote char, (4) raw inner value.
+ */
+const QUOTED_ENTRY = /^(\s*)(?:-\s+)?(["']?)([^:"']+)\2:\s+(['"])(.*)\4\s*$/;
+
+/**
+ * Decides whether a key is eligible for embedded-JSON expansion based on the
+ * configured options. Mirrors the spec: explicit `keys`/`keyPattern` restrict
+ * eligibility; otherwise `autoDetect` makes every key eligible.
+ */
+function isKeyEligible(key: string, options: EmbeddedJsonOptions): boolean {
+  const hasKeyList = options.keys.length > 0;
+  const hasPattern = options.keyPattern.length > 0;
+
+  if (hasKeyList || hasPattern) {
+    if (hasKeyList && options.keys.includes(key)) {
+      return true;
+    }
+    if (hasPattern) {
+      try {
+        return new RegExp(options.keyPattern).test(key);
+      } catch {
+        // Invalid user regex — treat as non-matching rather than throwing.
+        return false;
+      }
+    }
+    return false;
+  }
+
+  return options.autoDetect;
+}
+
+/**
+ * Unescapes the raw inner text of a quoted YAML scalar into the literal string
+ * it represents, so it can be fed to `JSON.parse`.
+ *
+ * - Single-quoted YAML escapes a quote by doubling it (`''` -> `'`).
+ * - Double-quoted YAML uses JSON-style backslash escapes, so re-wrapping the
+ *   token and running it through `JSON.parse` yields the literal value.
+ */
+function unescapeYamlScalar(quote: string, inner: string): string {
+  if (quote === "'") {
+    return inner.replace(/''/g, "'");
+  }
+  try {
+    return JSON.parse(`"${inner}"`) as string;
+  } catch {
+    return inner;
+  }
+}
+
+/**
+ * Creates a formatter that expands single-line JSON strings embedded as values
+ * inside text files (typically YAML). The transformation is surgical: only
+ * matched value lines are rewritten as indented YAML block scalars; every other
+ * line is preserved byte-for-byte so diffs stay minimal.
+ */
+export function createEmbeddedJsonFormatter(options: EmbeddedJsonOptions): Formatter {
+  return {
+    id: 'embedded-json',
+    extensions: options.extensions,
+    format: (content: string): string => {
+      const lines = content.split('\n');
+      const out: string[] = [];
+
+      for (const line of lines) {
+        const match = QUOTED_ENTRY.exec(line);
+        if (match === null) {
+          out.push(line);
+          continue;
+        }
+
+        const [, indent, , key, quote, rawValue] = match;
+        if (!isKeyEligible(key, options)) {
+          out.push(line);
+          continue;
+        }
+
+        const literal = unescapeYamlScalar(quote, rawValue);
+        const expanded = tryExpandJson(literal);
+        if (expanded === undefined) {
+          out.push(line);
+          continue;
+        }
+
+        // Emit `key: |-` then the pretty JSON indented two spaces beyond the
+        // key. A block scalar keeps the expansion valid-looking YAML for the
+        // read-only diff view.
+        const blockIndent = `${indent}  `;
+        out.push(`${indent}${key}: |-`);
+        for (const jsonLine of expanded.split('\n')) {
+          out.push(`${blockIndent}${jsonLine}`);
+        }
+      }
+
+      return out.join('\n');
+    },
+  };
+}
+
+/**
+ * Pretty-prints `value` if it is JSON describing an object or array. Returns
+ * `undefined` for scalars or non-JSON so callers can leave the line untouched.
+ */
+function tryExpandJson(value: string): string | undefined {
+  const trimmed = value.trim();
+  // Cheap pre-check: only objects/arrays are worth expanding.
+  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return undefined;
+    }
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Configuration shape consumed by {@link buildRegistry}. */
+export interface RegistryConfig {
+  readonly json: { readonly fileExtensions: readonly string[] };
+  readonly embeddedJson: {
+    readonly enabled: boolean;
+    readonly fileExtensions: readonly string[];
+    readonly autoDetect: boolean;
+    readonly keys: readonly string[];
+    readonly keyPattern: string;
+  };
+}
+
+/**
+ * Builds a registry from configuration. The standalone JSON formatter is always
+ * registered; the embedded-JSON formatter is registered only when enabled.
  *
  * To add a new format later, register it here (or call `registry.register`
  * from anywhere). For example:
@@ -124,8 +276,32 @@ export const jsonFormatter: Formatter = {
  * });
  * ```
  */
-export function createDefaultRegistry(): FormatterRegistry {
+export function buildRegistry(config: RegistryConfig): FormatterRegistry {
   const registry = new FormatterRegistry();
-  registry.register(jsonFormatter);
+  registry.register(createJsonFormatter(config.json.fileExtensions));
+  if (config.embeddedJson.enabled) {
+    registry.register(
+      createEmbeddedJsonFormatter({
+        extensions: config.embeddedJson.fileExtensions,
+        autoDetect: config.embeddedJson.autoDetect,
+        keys: config.embeddedJson.keys,
+        keyPattern: config.embeddedJson.keyPattern,
+      }),
+    );
+  }
   return registry;
+}
+
+/** Creates a registry using built-in defaults (JSON + embedded JSON in YAML). */
+export function createDefaultRegistry(): FormatterRegistry {
+  return buildRegistry({
+    json: { fileExtensions: ['json'] },
+    embeddedJson: {
+      enabled: true,
+      fileExtensions: ['yaml', 'yml'],
+      autoDetect: true,
+      keys: [],
+      keyPattern: '',
+    },
+  });
 }

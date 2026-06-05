@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ChangedFile, GitApi } from './gitApi';
+import type { FormatterRegistry } from './formatterRegistry';
 
 /** Command invoked when a tree item is selected. */
 export const OPEN_DIFF_COMMAND = 'gitlinediff.openDiff';
@@ -10,12 +11,27 @@ const FILE_CONTEXT_VALUE = 'gitLineDiffFile';
 /**
  * Tree item representing a single changed file. Selecting it runs the
  * {@link OPEN_DIFF_COMMAND}, passing the underlying {@link ChangedFile} along.
+ *
+ * @param file The changed file this item represents.
+ * @param formatterId Id of the formatter that applies, or `undefined` if the
+ *        file will be shown as a plain (unformatted) diff.
  */
 export class ChangedFileItem extends vscode.TreeItem {
-  constructor(public readonly file: ChangedFile) {
+  constructor(
+    public readonly file: ChangedFile,
+    formatterId: string | undefined,
+  ) {
     super(file.fileName, vscode.TreeItemCollapsibleState.None);
-    this.description = file.relativePath;
-    this.tooltip = file.uri.fsPath;
+    // Surface the formatter inline so users can tell which files get the pretty
+    // treatment versus a plain diff.
+    this.description =
+      formatterId === undefined
+        ? file.relativePath
+        : `${file.relativePath} · ${formatterId}`;
+    this.tooltip =
+      formatterId === undefined
+        ? `${file.uri.fsPath}\n(plain diff — no formatter)`
+        : `${file.uri.fsPath}\n(pretty diff — ${formatterId})`;
     this.resourceUri = file.uri;
     this.contextValue = FILE_CONTEXT_VALUE;
     this.iconPath = vscode.ThemeIcon.File;
@@ -29,18 +45,21 @@ export class ChangedFileItem extends vscode.TreeItem {
 
 /**
  * Predicate deciding whether a changed file should appear in the view.
- * Centralised so additional formats can be enabled by widening the filter.
+ * Centralised so the list can be narrowed in the future if desired.
  */
 export type FileFilter = (file: ChangedFile) => boolean;
 
-/** Default filter: only show `*.json` files, per the initial requirements. */
-export const jsonOnlyFilter: FileFilter = (file) =>
-  file.fileName.toLowerCase().endsWith('.json');
+/** Default filter: show every changed file in the working tree. */
+export const allChangesFilter: FileFilter = () => true;
 
 /**
  * Supplies the GitLineDiff Source Control view with the list of changed files
  * that pass the configured {@link FileFilter}. Refreshes automatically when the
  * Git repository state changes.
+ *
+ * @param getRegistry Returns the current formatter registry. A getter (rather
+ *        than a fixed instance) lets the view reflect live configuration
+ *        changes that rebuild the registry.
  */
 export class GitLineDiffTreeProvider
   implements vscode.TreeDataProvider<ChangedFileItem>, vscode.Disposable
@@ -54,7 +73,8 @@ export class GitLineDiffTreeProvider
 
   constructor(
     private readonly gitApi: GitApi,
-    private readonly filter: FileFilter = jsonOnlyFilter,
+    private readonly getRegistry: () => FormatterRegistry,
+    private readonly filter: FileFilter = allChangesFilter,
   ) {
     // Auto-refresh whenever the repository state changes.
     this.disposables.push(this.gitApi.onDidChange(() => this.refresh()));
@@ -74,11 +94,12 @@ export class GitLineDiffTreeProvider
     if (element !== undefined) {
       return [];
     }
+    const registry = this.getRegistry();
     return this.gitApi
       .getWorkingTreeChanges()
       .filter(this.filter)
       .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
-      .map((file) => new ChangedFileItem(file));
+      .map((file) => new ChangedFileItem(file, registry.resolve(file.uri.fsPath)?.id));
   }
 
   public dispose(): void {

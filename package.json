@@ -45,6 +45,44 @@
         "icon": "$(refresh)"
       }
     ],
+    "configuration": {
+      "title": "GitLineDiff",
+      "properties": {
+        "gitlinediff.json.fileExtensions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["json"],
+          "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone JSON."
+        },
+        "gitlinediff.embeddedJson.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Expand single-line JSON strings embedded inside other files (e.g. a YAML value like `attributeValue: '{...}'`)."
+        },
+        "gitlinediff.embeddedJson.fileExtensions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["yaml", "yml"],
+          "markdownDescription": "File extensions (without the leading dot) scanned for embedded JSON string values."
+        },
+        "gitlinediff.embeddedJson.autoDetect": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When no `keys`/`keyPattern` are configured, expand the value of any key whose string content parses as a JSON object or array."
+        },
+        "gitlinediff.embeddedJson.keys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Restrict embedded-JSON expansion to these exact key names. When non-empty, only these keys (and any matching `keyPattern`) are expanded."
+        },
+        "gitlinediff.embeddedJson.keyPattern": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional regular expression matched against key names. A key is eligible if it matches this pattern (combined with `keys`)."
+        }
+      }
+    },
     "menus": {
       "view/title": [
         {
