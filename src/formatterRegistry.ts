@@ -128,10 +128,12 @@ export interface EmbeddedJsonOptions {
 /**
  * Matches a single YAML mapping entry whose value is a quoted scalar, e.g.
  *   `  attributeValue: '{"a":1}'`
+ *   `  attributeValue:'{"a":1}'`   (no space after the colon — some generators)
  *   `- attributeValue: "{\"a\":1}"`
- * Captures: (1) indentation, (2) key, (3) quote char, (4) raw inner value.
+ * The space after the colon is optional (`\s*`) to support generators that omit
+ * it. Captures: (1) indentation, (2) key, (3) quote char, (4) raw inner value.
  */
-const QUOTED_ENTRY = /^(\s*)(?:-\s+)?(["']?)([^:"']+)\2:\s+(['"])(.*)\4\s*$/;
+const QUOTED_ENTRY = /^(\s*)(?:-\s+)?(["']?)([^:"']+)\2:\s*(['"])(.*)\4\s*$/;
 
 /**
  * Decides whether a key is eligible for embedded-JSON expansion based on the
