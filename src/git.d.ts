@@ -65,6 +65,23 @@ export interface Branch {
   readonly commit?: string;
 }
 
+/** A commit returned by {@link Repository.log} / {@link Repository.getCommit}. */
+export interface Commit {
+  readonly hash: string;
+  readonly message: string;
+  /** Parent commit hashes. Empty for the root commit. */
+  readonly parents: string[];
+  readonly authorName?: string;
+  readonly authorEmail?: string;
+  readonly authorDate?: Date;
+}
+
+/** Options accepted by {@link Repository.log}. */
+export interface LogOptions {
+  /** Maximum number of commits to return. */
+  readonly maxEntries?: number;
+}
+
 export interface Repository {
   /** Filesystem root of the repository. */
   readonly rootUri: Uri;
@@ -77,6 +94,19 @@ export interface Repository {
    * @param path Absolute path to the file on disk.
    */
   show(ref: string, path: string): Promise<string>;
+
+  /** Returns the commit metadata for a ref (e.g. a commit hash). */
+  getCommit(ref: string): Promise<Commit>;
+
+  /** Returns recent commits, most recent first. */
+  log(options?: LogOptions): Promise<Commit[]>;
+
+  /**
+   * Returns the set of changes between two refs (`git diff ref1 ref2`).
+   * Each {@link Change} carries `originalUri` (path at `ref1`) and `uri`
+   * (path at `ref2`), accounting for renames.
+   */
+  diffBetween(ref1: string, ref2: string): Promise<Change[]>;
 }
 
 /** The Git extension API (version 1). */

@@ -31,17 +31,31 @@
           "id": "gitLineDiffView",
           "name": "GitLineDiff",
           "contextualTitle": "GitLineDiff"
+        },
+        {
+          "id": "gitLineDiffGraph",
+          "name": "GitLineDiff Graph",
+          "type": "webview",
+          "contextualTitle": "GitLineDiff"
         }
       ]
     },
     "commands": [
       {
         "command": "gitlinediff.openDiff",
-        "title": "GitLineDiff: Open Pretty Diff"
+        "title": "Open Changes with GitLineDiff",
+        "category": "GitLineDiff"
+      },
+      {
+        "command": "gitlinediff.openCommitDiff",
+        "title": "Open Commit Diff",
+        "category": "GitLineDiff",
+        "icon": "$(git-commit)"
       },
       {
         "command": "gitlinediff.refresh",
-        "title": "GitLineDiff: Refresh",
+        "title": "Refresh",
+        "category": "GitLineDiff",
         "icon": "$(refresh)"
       }
     ],
@@ -89,6 +103,11 @@
           "command": "gitlinediff.refresh",
           "when": "view == gitLineDiffView",
           "group": "navigation"
+        },
+        {
+          "command": "gitlinediff.openCommitDiff",
+          "when": "view == gitLineDiffGraph",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -96,6 +115,36 @@
           "command": "gitlinediff.openDiff",
           "when": "view == gitLineDiffView && viewItem == gitLineDiffFile",
           "group": "inline"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "gitlinediff.openDiff",
+          "when": "scmProvider == git",
+          "group": "navigation@99"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "gitlinediff.openDiff",
+          "when": "!explorerResourceIsFolder",
+          "group": "3_compare@99"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "gitlinediff.openDiff",
+          "group": "1_diff"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "gitlinediff.openDiff",
+          "when": "editorIsOpen"
+        },
+        {
+          "command": "gitlinediff.openCommitDiff",
+          "when": "gitOpenRepositoryCount != 0"
         }
       ]
     }

@@ -1,11 +1,36 @@
 import * as vscode from 'vscode';
-import type { API, GitExtension, Repository, Change } from './git';
+import type { API, GitExtension, Repository, Change, Commit } from './git';
 
 /** Identifier of the built-in VS Code Git extension. */
 const GIT_EXTENSION_ID = 'vscode.git';
 
 /** Git ref used to read the committed (baseline) version of a file. */
 export const HEAD_REF = 'HEAD';
+
+/**
+ * The well-known SHA of git's empty tree. Used as the base when diffing the
+ * repository's root commit (which has no parent).
+ */
+const EMPTY_TREE_REF = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/** A single file's change within a specific commit (parent -> commit). */
+export interface CommitDiffFile {
+  /** Path of the file at the parent revision (differs on rename). */
+  readonly originalUri: vscode.Uri;
+  /** Path of the file at the commit revision. */
+  readonly uri: vscode.Uri;
+  /** Path relative to the repository root, for display. */
+  readonly relativePath: string;
+}
+
+/** The resolved diff for a commit: its base ref plus the changed files. */
+export interface CommitDiff {
+  /** The ref the commit is compared against (its first parent or empty tree). */
+  readonly baseRef: string;
+  /** The commit's own hash. */
+  readonly commitRef: string;
+  readonly files: CommitDiffFile[];
+}
 
 /**
  * A changed file surfaced by the extension. This is a thin, decoupled view over
@@ -110,21 +135,68 @@ export class GitApi implements vscode.Disposable {
   }
 
   /**
-   * Reads the `HEAD` (committed) version of a file via the Git API.
+   * Reads the version of a file at an arbitrary git ref (e.g. `HEAD`, a commit
+   * hash, or a parent commit).
    *
-   * @returns The file content at `HEAD`, or an empty string if the file does
-   *          not exist at `HEAD` (e.g. a newly added file).
+   * @returns The file content at `ref`, or an empty string if the file does not
+   *          exist at that ref (e.g. an added or deleted file).
    */
-  public async readHead(uri: vscode.Uri): Promise<string> {
+  public async readRef(ref: string, uri: vscode.Uri): Promise<string> {
     const repository = this.getPrimaryRepository();
-    if (repository === undefined) {
+    if (repository === undefined || ref === '') {
       return '';
     }
     try {
-      return await repository.show(HEAD_REF, uri.fsPath);
+      return await repository.show(ref, uri.fsPath);
     } catch {
-      // File is likely untracked / added and has no HEAD revision.
+      // File doesn't exist at this ref (added/deleted/renamed).
       return '';
+    }
+  }
+
+  /** Convenience wrapper for {@link readRef} at `HEAD`. */
+  public readHead(uri: vscode.Uri): Promise<string> {
+    return this.readRef(HEAD_REF, uri);
+  }
+
+  /** Returns recent commits (most recent first), or `[]` if unavailable. */
+  public async getRecentCommits(maxEntries = 50): Promise<Commit[]> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return [];
+    }
+    try {
+      return await repository.log({ maxEntries });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Resolves the changed files of a commit relative to its first parent (or the
+   * empty tree for the root commit).
+   */
+  public async getCommitDiff(commitRef: string): Promise<CommitDiff> {
+    const repository = this.getPrimaryRepository();
+    const empty: CommitDiff = { baseRef: '', commitRef, files: [] };
+    if (repository === undefined) {
+      return empty;
+    }
+
+    try {
+      const commit = await repository.getCommit(commitRef);
+      const baseRef = commit.parents[0] ?? EMPTY_TREE_REF;
+      const rootPath = repository.rootUri.fsPath;
+      const changes = await repository.diffBetween(baseRef, commitRef);
+
+      const files = changes.map((change: Change): CommitDiffFile => ({
+        originalUri: change.originalUri,
+        uri: change.uri,
+        relativePath: GitApi.toRelative(rootPath, change.uri.fsPath),
+      }));
+      return { baseRef, commitRef, files };
+    } catch {
+      return empty;
     }
   }
 

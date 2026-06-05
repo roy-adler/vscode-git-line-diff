@@ -26,12 +26,34 @@ documents.
 - **In-memory only** — uses VS Code virtual documents; originals are untouched.
 - **Extensible formatter registry** — add XML, YAML, TOML, or custom formats
   with a few lines of code.
-- **Auto-refresh** — the view and open diffs update when the repo *or* the
+- **Right-click anywhere** — "Open Changes with GitLineDiff" from the Source
+  Control changes list, the Explorer, or an editor tab (HEAD vs working tree).
+- **Commit graph** — a built-in visual history graph; click a commit to open its
+  multi-file pretty diff against its parent.
+- **Auto-refresh** — the views and open diffs update when the repo *or* the
   settings change.
 
 The view lists **all** changed files in the working tree. Files with a matching
 formatter are annotated (e.g. `config.yaml · embedded-json`) and open as a
 pretty diff; files without one open as an ordinary diff.
+
+### Ways to open a pretty diff
+
+- **GitLineDiff view** — click a changed file (working tree vs `HEAD`).
+- **Right-click → "Open Changes with GitLineDiff"** — from the built-in Source
+  Control changes list, the Explorer, or the editor tab context menu.
+- **GitLineDiff Graph** — click any commit to open its multi-file diff vs its
+  parent. You can also run **"GitLineDiff: Open Commit Diff"** from the Command
+  Palette to pick a commit from a list.
+
+### The commit graph
+
+The **GitLineDiff Graph** view (in the Source Control sidebar) renders your
+commit history with branch/merge lanes. It's our own webview — not the built-in
+graph — because VS Code's graph context menu is gated behind a proposed API that
+installed extensions can't use. Owning the view lets us put the pretty diff one
+click away from any commit. Diffs are commit-vs-first-parent (the root commit is
+compared against the empty tree).
 
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs
@@ -181,11 +203,22 @@ To expand only specific keys, set:
 src/
 ├── extension.ts          Activation, virtual-document provider, commands, config wiring
 ├── config.ts             Typed reader for gitlinediff.* settings
-├── gitApi.ts             Typed wrapper around the built-in Git extension
+├── gitApi.ts             Typed wrapper around the built-in Git extension (changes, refs, commits)
 ├── git.d.ts              Vendored, minimal type declarations for vscode.git
 ├── treeView.ts           Source Control TreeDataProvider + formatter annotation
+├── graphLayout.ts        Pure commit-graph lane/line layout algorithm
+├── graphView.ts          Commit-graph webview (renders the layout, opens commit diffs)
 └── formatterRegistry.ts  Pluggable formatters (JSON + embedded-JSON), built from config
 ```
+
+### Ref-aware virtual documents
+
+A virtual URI encodes the file path plus a *ref*: `working` (read from disk) or
+any git ref (`HEAD`, a commit hash, a parent). This single mechanism powers both
+the working-tree diff (`HEAD` vs `working`) and commit diffs
+(`parent` vs `commit`) — and a commit's multi-file diff is opened via
+`_workbench.openMultiDiffEditor`, falling back to individual diff tabs if that
+command is unavailable.
 
 Design principles:
 

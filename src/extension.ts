@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
-import { GitApi, type ChangedFile } from './gitApi';
+import { GitApi } from './gitApi';
 import { buildRegistry, FormatterRegistry } from './formatterRegistry';
 import { ChangedFileItem, GitLineDiffTreeProvider, OPEN_DIFF_COMMAND } from './treeView';
 import { readConfig, affectsConfig } from './config';
+import { GitLineDiffGraphProvider, GRAPH_VIEW_ID } from './graphView';
+
+/** Command that opens a commit's multi-file pretty diff. */
+const OPEN_COMMIT_DIFF_COMMAND = 'gitlinediff.openCommitDiff';
 
 /** Custom URI scheme backing the in-memory, pretty-printed virtual documents. */
 const SCHEME = 'gitlinediff';
@@ -10,8 +14,13 @@ const SCHEME = 'gitlinediff';
 /** View identifier declared in `package.json` -> contributes.views.scm. */
 const VIEW_ID = 'gitLineDiffView';
 
-/** Which revision of a file a virtual document represents. */
-type Ref = 'working' | 'head';
+/**
+ * Which revision of a file a virtual document represents. `WORKING_REF` reads
+ * from disk; any other value is a git ref (e.g. `HEAD`, a commit hash, or a
+ * parent commit) read through the Git API.
+ */
+const WORKING_REF = 'working';
+const HEAD_REF = 'HEAD';
 
 /** Query keys used to encode state inside a virtual URI. */
 const QUERY_REF = 'ref';
@@ -25,7 +34,8 @@ const QUERY_SRC = 'src';
  * Each virtual URI encodes:
  *  - the path of the original file (preserved as the URI path so VS Code infers
  *    the correct language for syntax highlighting), and
- *  - a `ref` (`working` | `head`) plus the original file path in the query.
+ *  - a `ref` (`working` or any git ref) plus the original file path in the
+ *    query.
  */
 class PrettyDiffContentProvider
   implements vscode.TextDocumentContentProvider, vscode.Disposable
@@ -58,10 +68,10 @@ class PrettyDiffContentProvider
   public refreshAll(): void {
     for (const file of this.gitApi.getWorkingTreeChanges()) {
       this.onDidChangeEmitter.fire(
-        PrettyDiffContentProvider.buildUri(file.uri.fsPath, 'head'),
+        PrettyDiffContentProvider.buildUri(file.uri.fsPath, HEAD_REF),
       );
       this.onDidChangeEmitter.fire(
-        PrettyDiffContentProvider.buildUri(file.uri.fsPath, 'working'),
+        PrettyDiffContentProvider.buildUri(file.uri.fsPath, WORKING_REF),
       );
     }
   }
@@ -73,7 +83,7 @@ class PrettyDiffContentProvider
 
   public async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
     const params = new URLSearchParams(uri.query);
-    const ref = (params.get(QUERY_REF) as Ref | null) ?? 'working';
+    const ref = params.get(QUERY_REF) ?? WORKING_REF;
     const src = params.get(QUERY_SRC);
     if (src === null) {
       return '';
@@ -81,9 +91,9 @@ class PrettyDiffContentProvider
 
     const sourceUri = vscode.Uri.file(src);
     const raw =
-      ref === 'head'
-        ? await this.gitApi.readHead(sourceUri)
-        : await this.gitApi.readWorkingTree(sourceUri);
+      ref === WORKING_REF
+        ? await this.gitApi.readWorkingTree(sourceUri)
+        : await this.gitApi.readRef(ref, sourceUri);
 
     // Transform through the registry before display. Unknown types or parse
     // failures fall back to the original content inside the formatter.
@@ -94,9 +104,9 @@ class PrettyDiffContentProvider
    * Builds a virtual URI for one side of the diff.
    *
    * @param sourceFsPath Absolute path of the real file.
-   * @param ref Which revision this side represents.
+   * @param ref `WORKING_REF` or any git ref (e.g. `HEAD` / commit hash).
    */
-  public static buildUri(sourceFsPath: string, ref: Ref): vscode.Uri {
+  public static buildUri(sourceFsPath: string, ref: string): vscode.Uri {
     const query = new URLSearchParams({
       [QUERY_REF]: ref,
       [QUERY_SRC]: sourceFsPath,
@@ -153,62 +163,175 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // Command: open a pretty diff for the selected file. The argument differs by
-  // invocation source: clicking the row passes the `ChangedFile` we attached to
-  // the item's command, while the inline menu button passes the
-  // `ChangedFileItem` tree node. Normalise both into a `ChangedFile`.
+  // Opens a commit's multi-file pretty diff (commit vs its parent).
+  const openCommitDiff = async (hash: string): Promise<void> => {
+    const diff = await gitApi.getCommitDiff(hash);
+    if (diff.files.length === 0) {
+      void vscode.window.showInformationMessage(
+        `GitLineDiff: no file changes found for ${hash.slice(0, 7)}.`,
+      );
+      return;
+    }
+
+    const resources = diff.files.map((file) => ({
+      originalUri: PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef),
+      modifiedUri: PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef),
+    }));
+    const title = `GitLineDiff: ${hash.slice(0, 7)}`;
+
+    try {
+      // Preferred: a single scrollable multi-file diff.
+      await vscode.commands.executeCommand('_workbench.openMultiDiffEditor', {
+        title,
+        resources,
+      });
+    } catch {
+      // Fallback for hosts without the multi-diff editor: one diff tab per file.
+      for (const file of diff.files) {
+        await vscode.commands.executeCommand(
+          'vscode.diff',
+          PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef),
+          PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef),
+          `${basename(file.uri.fsPath)} @ ${hash.slice(0, 7)}`,
+        );
+      }
+    }
+  };
+
+  // Register the commit-graph webview view.
+  const graphProvider = new GitLineDiffGraphProvider(gitApi, (hash) => {
+    void openCommitDiff(hash);
+  });
   context.subscriptions.push(
-    vscode.commands.registerCommand(
-      OPEN_DIFF_COMMAND,
-      async (arg?: ChangedFile | ChangedFileItem) => {
-        const file = resolveChangedFile(arg);
-        if (file === undefined) {
-          return;
-        }
-        await openPrettyDiff(file);
-      },
-    ),
+    vscode.window.registerWebviewViewProvider(GRAPH_VIEW_ID, graphProvider),
+    graphProvider,
   );
 
-  // Command: refresh the view manually.
+  // Command: open a pretty diff for the selected file. The argument shape
+  // varies by source (tree item, SCM resource, Explorer/editor URI); the
+  // resolver normalises all of them.
   context.subscriptions.push(
-    vscode.commands.registerCommand('gitlinediff.refresh', () => treeProvider.refresh()),
+    vscode.commands.registerCommand(OPEN_DIFF_COMMAND, async (arg?: unknown) => {
+      const target = resolveDiffTarget(arg);
+      if (target === undefined) {
+        return;
+      }
+      await openPrettyDiff(target);
+    }),
+  );
+
+  // Command: open a commit's pretty diff. With no argument, prompts the user to
+  // pick a commit; the graph view passes a hash directly.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(OPEN_COMMIT_DIFF_COMMAND, async (arg?: unknown) => {
+      let hash = typeof arg === 'string' ? arg : undefined;
+      if (hash === undefined) {
+        hash = await pickCommit(gitApi);
+      }
+      if (hash !== undefined) {
+        await openCommitDiff(hash);
+      }
+    }),
+  );
+
+  // Command: refresh both views manually.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gitlinediff.refresh', () => {
+      treeProvider.refresh();
+      graphProvider.refresh();
+    }),
   );
 }
 
+/** A normalised target for a working-tree pretty diff. */
+interface DiffTarget {
+  readonly uri: vscode.Uri;
+  readonly fileName: string;
+}
+
+/** Returns the file name from a path, normalising separators. */
+function basename(filePath: string): string {
+  return filePath.replace(/\\/g, '/').split('/').pop() ?? filePath;
+}
+
 /**
- * Normalises the command argument into a {@link ChangedFile}. Accepts the
- * `ChangedFile` attached to a tree item's command, a `ChangedFileItem` passed
- * by the inline menu contribution, or `undefined` (e.g. command palette).
+ * Normalises a command argument into a {@link DiffTarget}. Handles our tree
+ * item, an SCM resource state (`.resourceUri`), a raw `Uri` (Explorer / editor
+ * tab), our `ChangedFile` (`.uri`), or `undefined` (falls back to the active
+ * editor).
  */
-function resolveChangedFile(
-  arg: ChangedFile | ChangedFileItem | undefined,
-): ChangedFile | undefined {
+function resolveDiffTarget(arg: unknown): DiffTarget | undefined {
   if (arg === undefined) {
-    return undefined;
+    const active = vscode.window.activeTextEditor?.document.uri;
+    return active === undefined
+      ? undefined
+      : { uri: active, fileName: basename(active.fsPath) };
   }
   if (arg instanceof ChangedFileItem) {
-    return arg.file;
+    return { uri: arg.file.uri, fileName: arg.file.fileName };
   }
-  // Defensive: only accept objects that actually carry a URI.
-  return arg.uri instanceof vscode.Uri ? arg : undefined;
+  if (arg instanceof vscode.Uri) {
+    return { uri: arg, fileName: basename(arg.fsPath) };
+  }
+  const record = arg as { uri?: unknown; resourceUri?: unknown; fileName?: unknown };
+  if (record.resourceUri instanceof vscode.Uri) {
+    return {
+      uri: record.resourceUri,
+      fileName: basename(record.resourceUri.fsPath),
+    };
+  }
+  if (record.uri instanceof vscode.Uri) {
+    return {
+      uri: record.uri,
+      fileName:
+        typeof record.fileName === 'string'
+          ? record.fileName
+          : basename(record.uri.fsPath),
+    };
+  }
+  return undefined;
+}
+
+/** Prompts the user to choose a commit; returns its hash or `undefined`. */
+async function pickCommit(gitApi: GitApi): Promise<string | undefined> {
+  const commits = await gitApi.getRecentCommits(100);
+  if (commits.length === 0) {
+    void vscode.window.showInformationMessage('GitLineDiff: no commits found.');
+    return undefined;
+  }
+
+  interface CommitPick extends vscode.QuickPickItem {
+    readonly hash: string;
+  }
+  const items: CommitPick[] = commits.map((commit) => ({
+    label: commit.message.split('\n', 1)[0]?.trim() || '(no message)',
+    description: commit.hash.slice(0, 7),
+    detail: commit.authorName,
+    hash: commit.hash,
+  }));
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select a commit to open its pretty diff (vs parent)',
+    matchOnDescription: true,
+  });
+  return pick?.hash;
 }
 
 /**
  * Opens a diff editor comparing the pretty-printed `HEAD` and working-tree
  * versions of a file. Both sides flow through the formatter registry.
  */
-async function openPrettyDiff(file: ChangedFile): Promise<void> {
-  const fsPath = file.uri.fsPath;
+async function openPrettyDiff(target: DiffTarget): Promise<void> {
+  const fsPath = target.uri.fsPath;
   // Left = committed baseline (HEAD), right = current working tree.
-  const leftUri = PrettyDiffContentProvider.buildUri(fsPath, 'head');
-  const rightUri = PrettyDiffContentProvider.buildUri(fsPath, 'working');
+  const leftUri = PrettyDiffContentProvider.buildUri(fsPath, HEAD_REF);
+  const rightUri = PrettyDiffContentProvider.buildUri(fsPath, WORKING_REF);
 
   await vscode.commands.executeCommand(
     'vscode.diff',
     leftUri,
     rightUri,
-    `GitLineDiff: ${file.fileName}`,
+    `GitLineDiff: ${target.fileName}`,
   );
 }
 
