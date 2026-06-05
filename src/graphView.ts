@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import type { GitApi } from './gitApi';
 import { computeGraphLayout, type GraphLine } from './graphLayout';
 
-/** View id declared in `package.json` -> contributes.views.scm. */
-export const GRAPH_VIEW_ID = 'gitLineDiffGraph';
+/** Webview panel view type for the commit graph. */
+export const GRAPH_VIEW_TYPE = 'gitLineDiffGraph';
 
 /** Row data sent to the webview for rendering. */
 interface GraphRowData {
@@ -32,16 +32,17 @@ function isOpenCommitMessage(value: unknown): value is OpenCommitMessage {
 }
 
 /**
- * Renders the commit history as a visual graph (webview) inside the Source
- * Control sidebar. Clicking a commit opens its multi-file pretty diff via the
- * supplied callback. Refreshes when the repository changes or the view becomes
- * visible again.
+ * Manages a single commit-graph webview **panel** in the editor area (full
+ * width, like Git Graph). Opened on demand via {@link show}; clicking a commit
+ * opens its multi-file pretty diff via the supplied callback. Re-renders when
+ * the repository changes while the panel is open.
  */
-export class GitLineDiffGraphProvider
-  implements vscode.WebviewViewProvider, vscode.Disposable
-{
-  private view: vscode.WebviewView | undefined;
+export class GitLineDiffGraphPanel implements vscode.Disposable {
+  private panel: vscode.WebviewPanel | undefined;
+  /** Disposables tied to the controller's whole lifetime. */
   private readonly disposables: vscode.Disposable[] = [];
+  /** Disposables tied to the currently-open panel. */
+  private panelDisposables: vscode.Disposable[] = [];
 
   /**
    * @param gitApi Source of commit history.
@@ -53,39 +54,53 @@ export class GitLineDiffGraphProvider
     private readonly onOpenCommit: (hash: string) => void,
     private readonly maxCommits = 200,
   ) {
-    this.disposables.push(this.gitApi.onDidChange(() => this.refresh()));
-  }
-
-  public resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true };
-
+    // Keep an open panel in sync with repository changes.
     this.disposables.push(
-      webviewView.webview.onDidReceiveMessage((message: unknown) => {
-        if (isOpenCommitMessage(message)) {
-          this.onOpenCommit(message.hash);
-        }
-      }),
-      webviewView.onDidChangeVisibility(() => {
-        if (webviewView.visible) {
+      this.gitApi.onDidChange(() => {
+        if (this.panel !== undefined) {
           void this.render();
         }
       }),
     );
-    webviewView.onDidDispose(() => {
-      this.view = undefined;
-    });
+  }
+
+  /** Opens the graph panel, or reveals it if already open. */
+  public show(): void {
+    if (this.panel !== undefined) {
+      this.panel.reveal(vscode.ViewColumn.Active);
+      return;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      GRAPH_VIEW_TYPE,
+      'GitLineDiff Graph',
+      vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    this.panel = panel;
+
+    this.panelDisposables.push(
+      panel.webview.onDidReceiveMessage((message: unknown) => {
+        if (isOpenCommitMessage(message)) {
+          this.onOpenCommit(message.hash);
+        }
+      }),
+      panel.onDidDispose(() => this.closePanel()),
+    );
 
     void this.render();
   }
 
+  /** Re-renders if the panel is open. */
   public refresh(): void {
-    void this.render();
+    if (this.panel !== undefined) {
+      void this.render();
+    }
   }
 
   private async render(): Promise<void> {
-    const view = this.view;
-    if (view === undefined) {
+    const panel = this.panel;
+    if (panel === undefined) {
       return;
     }
 
@@ -105,10 +120,20 @@ export class GitLineDiffGraphProvider
       };
     });
 
-    view.webview.html = renderHtml(view.webview, rows, layout.columns);
+    panel.webview.html = renderHtml(panel.webview, rows, layout.columns);
+  }
+
+  private closePanel(): void {
+    for (const disposable of this.panelDisposables) {
+      disposable.dispose();
+    }
+    this.panelDisposables = [];
+    this.panel = undefined;
   }
 
   public dispose(): void {
+    this.panel?.dispose();
+    this.closePanel();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }

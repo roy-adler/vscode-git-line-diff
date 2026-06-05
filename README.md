@@ -28,7 +28,8 @@ documents.
   with a few lines of code.
 - **Right-click anywhere** — "Open Changes with GitLineDiff" from the Source
   Control changes list, the Explorer, or an editor tab (HEAD vs working tree).
-- **Commit graph** — a built-in visual history graph; click a commit to open its
+- **Commit graph** — a full-width visual history graph that opens in the editor
+  area (via a status-bar button or the view toolbar); click a commit to open its
   multi-file pretty diff against its parent.
 - **Auto-refresh** — the views and open diffs update when the repo *or* the
   settings change.
@@ -42,18 +43,20 @@ pretty diff; files without one open as an ordinary diff.
 - **GitLineDiff view** — click a changed file (working tree vs `HEAD`).
 - **Right-click → "Open Changes with GitLineDiff"** — from the built-in Source
   Control changes list, the Explorer, or the editor tab context menu.
-- **GitLineDiff Graph** — click any commit to open its multi-file diff vs its
-  parent. You can also run **"GitLineDiff: Open Commit Diff"** from the Command
-  Palette to pick a commit from a list.
+- **Commit graph** — open it with the **GitLineDiff Graph** status-bar button,
+  the graph icon in the GitLineDiff view toolbar, or **"GitLineDiff: Open Commit
+  Graph"** from the Command Palette. Then click any commit to open its
+  multi-file diff vs its parent. (You can also run **"GitLineDiff: Open Commit
+  Diff"** to pick a commit from a list.)
 
 ### The commit graph
 
-The **GitLineDiff Graph** view (in the Source Control sidebar) renders your
-commit history with branch/merge lanes. It's our own webview — not the built-in
-graph — because VS Code's graph context menu is gated behind a proposed API that
-installed extensions can't use. Owning the view lets us put the pretty diff one
-click away from any commit. Diffs are commit-vs-first-parent (the root commit is
-compared against the empty tree).
+The graph opens as a **full-width panel in the editor area** (like Git Graph),
+rendering your commit history with branch/merge lanes. It's our own webview —
+not VS Code's built-in graph — because the built-in graph's context menu is
+gated behind a proposed API that installed extensions can't use. Owning the
+panel lets us put the pretty diff one click away from any commit. Diffs are
+commit-vs-first-parent (the root commit is compared against the empty tree).
 
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs
@@ -207,7 +210,7 @@ src/
 ├── git.d.ts              Vendored, minimal type declarations for vscode.git
 ├── treeView.ts           Source Control TreeDataProvider + formatter annotation
 ├── graphLayout.ts        Pure commit-graph lane/line layout algorithm
-├── graphView.ts          Commit-graph webview (renders the layout, opens commit diffs)
+├── graphView.ts          Commit-graph webview panel (renders the layout, opens commit diffs)
 └── formatterRegistry.ts  Pluggable formatters (JSON + embedded-JSON), built from config
 ```
 

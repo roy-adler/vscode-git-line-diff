@@ -31,12 +31,6 @@
           "id": "gitLineDiffView",
           "name": "GitLineDiff",
           "contextualTitle": "GitLineDiff"
-        },
-        {
-          "id": "gitLineDiffGraph",
-          "name": "GitLineDiff Graph",
-          "type": "webview",
-          "contextualTitle": "GitLineDiff"
         }
       ]
     },
@@ -51,6 +45,12 @@
         "title": "Open Commit Diff",
         "category": "GitLineDiff",
         "icon": "$(git-commit)"
+      },
+      {
+        "command": "gitlinediff.openGraph",
+        "title": "Open Commit Graph",
+        "category": "GitLineDiff",
+        "icon": "$(graph)"
       },
       {
         "command": "gitlinediff.refresh",
@@ -100,14 +100,14 @@
     "menus": {
       "view/title": [
         {
-          "command": "gitlinediff.refresh",
+          "command": "gitlinediff.openGraph",
           "when": "view == gitLineDiffView",
-          "group": "navigation"
+          "group": "navigation@1"
         },
         {
-          "command": "gitlinediff.openCommitDiff",
-          "when": "view == gitLineDiffGraph",
-          "group": "navigation"
+          "command": "gitlinediff.refresh",
+          "when": "view == gitLineDiffView",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -144,6 +144,10 @@
         },
         {
           "command": "gitlinediff.openCommitDiff",
+          "when": "gitOpenRepositoryCount != 0"
+        },
+        {
+          "command": "gitlinediff.openGraph",
           "when": "gitOpenRepositoryCount != 0"
         }
       ]

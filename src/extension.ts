@@ -3,10 +3,13 @@ import { GitApi } from './gitApi';
 import { buildRegistry, FormatterRegistry } from './formatterRegistry';
 import { ChangedFileItem, GitLineDiffTreeProvider, OPEN_DIFF_COMMAND } from './treeView';
 import { readConfig, affectsConfig } from './config';
-import { GitLineDiffGraphProvider, GRAPH_VIEW_ID } from './graphView';
+import { GitLineDiffGraphPanel } from './graphView';
 
 /** Command that opens a commit's multi-file pretty diff. */
 const OPEN_COMMIT_DIFF_COMMAND = 'gitlinediff.openCommitDiff';
+
+/** Command that opens the commit graph panel. */
+const OPEN_GRAPH_COMMAND = 'gitlinediff.openGraph';
 
 /** Custom URI scheme backing the in-memory, pretty-printed virtual documents. */
 const SCHEME = 'gitlinediff';
@@ -198,14 +201,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
-  // Register the commit-graph webview view.
-  const graphProvider = new GitLineDiffGraphProvider(gitApi, (hash) => {
+  // Commit-graph panel (opens full-width in the editor area on demand).
+  const graphPanel = new GitLineDiffGraphPanel(gitApi, (hash) => {
     void openCommitDiff(hash);
   });
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(GRAPH_VIEW_ID, graphProvider),
-    graphProvider,
+    graphPanel,
+    vscode.commands.registerCommand(OPEN_GRAPH_COMMAND, () => graphPanel.show()),
   );
+
+  // Status-bar button to open the graph (like Git Graph).
+  const statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    0,
+  );
+  statusBarItem.text = '$(git-commit) GitLineDiff Graph';
+  statusBarItem.tooltip = 'Open the GitLineDiff commit graph';
+  statusBarItem.command = OPEN_GRAPH_COMMAND;
+  if (ready) {
+    statusBarItem.show();
+  }
+  context.subscriptions.push(statusBarItem);
 
   // Command: open a pretty diff for the selected file. The argument shape
   // varies by source (tree item, SCM resource, Explorer/editor URI); the
@@ -234,11 +250,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // Command: refresh both views manually.
+  // Command: refresh the file view and the graph (if open) manually.
   context.subscriptions.push(
     vscode.commands.registerCommand('gitlinediff.refresh', () => {
       treeProvider.refresh();
-      graphProvider.refresh();
+      graphPanel.refresh();
     }),
   );
 }
