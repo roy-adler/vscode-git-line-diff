@@ -3,7 +3,7 @@
   "displayName": "GitLineDiff",
   "description": "Diff single-line files (especially JSON) by pretty-printing both sides in memory before comparing.",
   "version": "0.1.0",
-  "publisher": "gitlinediff",
+  "publisher": "RoyAdler",
   "license": "MIT",
   "icon": "media/images/icon.png",
   "repository": {
