@@ -202,9 +202,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   // Commit-graph panel (opens full-width in the editor area on demand).
-  const graphPanel = new GitLineDiffGraphPanel(gitApi, (hash) => {
-    void openCommitDiff(hash);
-  });
+  const graphPanel = new GitLineDiffGraphPanel(
+    gitApi,
+    (hash) => {
+      void openCommitDiff(hash);
+    },
+    context.extensionUri,
+  );
   context.subscriptions.push(
     graphPanel,
     vscode.commands.registerCommand(OPEN_GRAPH_COMMAND, () => graphPanel.show()),

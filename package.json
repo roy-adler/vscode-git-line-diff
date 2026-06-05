@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "publisher": "gitlinediff",
   "license": "MIT",
+  "icon": "media/images/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },

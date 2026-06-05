@@ -47,11 +47,13 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   /**
    * @param gitApi Source of commit history.
    * @param onOpenCommit Invoked with a commit hash when the user clicks a row.
+   * @param extensionUri Base URI of the extension, used to resolve the tab icon.
    * @param maxCommits Upper bound on commits to load.
    */
   constructor(
     private readonly gitApi: GitApi,
     private readonly onOpenCommit: (hash: string) => void,
+    private readonly extensionUri: vscode.Uri,
     private readonly maxCommits = 200,
   ) {
     // Keep an open panel in sync with repository changes.
@@ -76,6 +78,12 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       'GitLineDiff Graph',
       vscode.ViewColumn.Active,
       { enableScripts: true, retainContextWhenHidden: true },
+    );
+    panel.iconPath = vscode.Uri.joinPath(
+      this.extensionUri,
+      'media',
+      'images',
+      'icon.png',
     );
     this.panel = panel;
 
