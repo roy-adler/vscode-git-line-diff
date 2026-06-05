@@ -2,7 +2,7 @@
   "name": "gitlinediff",
   "displayName": "GitLineDiff",
   "description": "Diff single-line files (especially JSON) by pretty-printing both sides in memory before comparing.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "RoyAdler",
   "license": "MIT",
   "icon": "media/images/icon.png",
@@ -73,8 +73,12 @@
       "properties": {
         "gitlinediff.json.fileExtensions": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["json"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "json"
+          ],
           "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone JSON."
         },
         "gitlinediff.embeddedJson.enabled": {
@@ -84,8 +88,13 @@
         },
         "gitlinediff.embeddedJson.fileExtensions": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["yaml", "yml"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "yaml",
+            "yml"
+          ],
           "markdownDescription": "File extensions (without the leading dot) scanned for embedded JSON string values."
         },
         "gitlinediff.embeddedJson.autoDetect": {
@@ -95,7 +104,9 @@
         },
         "gitlinediff.embeddedJson.keys": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Restrict embedded-JSON expansion to these exact key names. When non-empty, only these keys (and any matching `keyPattern`) are expanded."
         },
