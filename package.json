@@ -6,6 +6,14 @@
   "publisher": "gitlinediff",
   "license": "MIT",
   "icon": "media/images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/roy-adler/vscode-git-line-diff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/roy-adler/vscode-git-line-diff/issues"
+  },
+  "homepage": "https://github.com/roy-adler/vscode-git-line-diff#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
