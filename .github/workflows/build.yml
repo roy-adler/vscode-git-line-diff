@@ -1,4 +1,4 @@
-name: Build & Publish
+name: Build & Release
 
 on:
   push:
@@ -45,7 +45,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Auto-bump, tag, and publish only on direct pushes to main.
+    # Auto-bump, tag, and attach the .vsix to a GitHub Release on pushes to main.
+    # Does NOT publish to the VS Code Marketplace.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -75,10 +76,21 @@ jobs:
         run: |
           npm version patch -m "ci: release v%s [skip ci]"
 
-      - name: Publish to VS Code Marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx --yes @vscode/vsce publish --pat "$VSCE_PAT"
+      - name: Read new version
+        id: version
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Package extension (.vsix)
+        run: npx --yes @vscode/vsce package --out gitlinediff-${{ steps.version.outputs.tag }}.vsix
 
       - name: Push version bump & tag
         run: git push --follow-tags origin HEAD:main
+
+      - name: Create GitHub Release with .vsix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "gitlinediff-${{ steps.version.outputs.tag }}.vsix" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
