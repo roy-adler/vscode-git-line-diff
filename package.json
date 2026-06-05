@@ -1,0 +1,79 @@
+{
+  "name": "gitlinediff",
+  "displayName": "GitLineDiff",
+  "description": "Diff single-line files (especially JSON) by pretty-printing both sides in memory before comparing.",
+  "version": "0.1.0",
+  "publisher": "gitlinediff",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "diff",
+    "json",
+    "pretty-print",
+    "scm"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "extensionDependencies": [
+    "vscode.git"
+  ],
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "id": "gitLineDiffView",
+          "name": "GitLineDiff",
+          "contextualTitle": "GitLineDiff"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitlinediff.openDiff",
+        "title": "GitLineDiff: Open Pretty Diff"
+      },
+      {
+        "command": "gitlinediff.refresh",
+        "title": "GitLineDiff: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gitlinediff.refresh",
+          "when": "view == gitLineDiffView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "gitlinediff.openDiff",
+          "when": "view == gitLineDiffView && viewItem == gitLineDiffFile",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  }
+}
