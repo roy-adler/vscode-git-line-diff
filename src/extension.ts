@@ -93,10 +93,19 @@ class PrettyDiffContentProvider
     }
 
     const sourceUri = vscode.Uri.file(src);
-    const raw =
-      ref === WORKING_REF
-        ? await this.gitApi.readWorkingTree(sourceUri)
-        : await this.gitApi.readRef(ref, sourceUri);
+    let raw: string;
+    if (ref === WORKING_REF) {
+      // The working-tree file may not exist (deleted file, or the source was a
+      // virtual diff side). Treat a missing file as empty rather than throwing,
+      // which would surface as an "unable to open" error in the diff editor.
+      try {
+        raw = await this.gitApi.readWorkingTree(sourceUri);
+      } catch {
+        raw = '';
+      }
+    } else {
+      raw = await this.gitApi.readRef(ref, sourceUri);
+    }
 
     // Transform through the registry before display. Unknown types or parse
     // failures fall back to the original content inside the formatter.
@@ -251,9 +260,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand(OPEN_DIFF_COMMAND, async (arg?: unknown) => {
       const target = resolveDiffTarget(arg);
       if (target === undefined) {
+        void vscode.window.showInformationMessage(
+          'GitLineDiff: no file to diff here. Open a file or pick one from the changes list.',
+        );
         return;
       }
-      await openPrettyDiff(target);
+      try {
+        await openPrettyDiff(target);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        void vscode.window.showErrorMessage(`GitLineDiff: could not open diff. ${detail}`);
+      }
     }),
   );
 
@@ -300,31 +317,62 @@ function basename(filePath: string): string {
 function resolveDiffTarget(arg: unknown): DiffTarget | undefined {
   if (arg === undefined) {
     const active = vscode.window.activeTextEditor?.document.uri;
-    return active === undefined
-      ? undefined
-      : { uri: active, fileName: basename(active.fsPath) };
+    return active === undefined ? undefined : toFileTarget(active);
   }
   if (arg instanceof ChangedFileItem) {
     return { uri: arg.file.uri, fileName: arg.file.fileName };
   }
   if (arg instanceof vscode.Uri) {
-    return { uri: arg, fileName: basename(arg.fsPath) };
+    return toFileTarget(arg);
   }
   const record = arg as { uri?: unknown; resourceUri?: unknown; fileName?: unknown };
   if (record.resourceUri instanceof vscode.Uri) {
-    return {
-      uri: record.resourceUri,
-      fileName: basename(record.resourceUri.fsPath),
-    };
+    return toFileTarget(record.resourceUri);
   }
   if (record.uri instanceof vscode.Uri) {
-    return {
-      uri: record.uri,
-      fileName:
-        typeof record.fileName === 'string'
-          ? record.fileName
-          : basename(record.uri.fsPath),
-    };
+    const target = toFileTarget(record.uri);
+    if (target !== undefined && typeof record.fileName === 'string') {
+      return { uri: target.uri, fileName: record.fileName };
+    }
+    return target;
+  }
+  return undefined;
+}
+
+/**
+ * Normalises any editor/diff URI to a real on-disk `file:` target. Diff editors
+ * (built-in `git:` diffs, or our own `gitlinediff:` pretty diffs) expose virtual
+ * URIs; this maps them back to the underlying working-tree file so a fresh
+ * pretty diff can be opened. Returns `undefined` for resources with no real path.
+ */
+function toFileTarget(uri: vscode.Uri): DiffTarget | undefined {
+  if (uri.scheme === 'file') {
+    return { uri, fileName: basename(uri.fsPath) };
+  }
+  if (uri.scheme === SCHEME) {
+    // Our virtual scheme carries the real path in the `src` query param.
+    const src = new URLSearchParams(uri.query).get(QUERY_SRC);
+    if (src !== null && src !== '') {
+      const fileUri = vscode.Uri.file(src);
+      return { uri: fileUri, fileName: basename(fileUri.fsPath) };
+    }
+  }
+  if (uri.scheme === 'git') {
+    // The built-in Git scheme encodes the file path as JSON in the query.
+    try {
+      const parsed = JSON.parse(uri.query) as { path?: unknown };
+      if (typeof parsed.path === 'string' && parsed.path !== '') {
+        const fileUri = vscode.Uri.file(parsed.path);
+        return { uri: fileUri, fileName: basename(fileUri.fsPath) };
+      }
+    } catch {
+      // Fall through to the generic fsPath handling below.
+    }
+  }
+  // Last resort: use the URI's fsPath if it looks like an absolute path.
+  const fsPath = uri.fsPath;
+  if (fsPath !== '' && (fsPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(fsPath))) {
+    return { uri: vscode.Uri.file(fsPath), fileName: basename(fsPath) };
   }
   return undefined;
 }
