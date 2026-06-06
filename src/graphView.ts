@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { GitApi, RefLabel } from './gitApi';
+import type { GitApi, RefLabel, CommitDiff, CommitDiffFile } from './gitApi';
 import { computeGraphLayout, type GraphLine } from './graphLayout';
 
 /** Webview panel view type for the commit graph. */
@@ -31,10 +31,36 @@ interface GraphControls {
 /** Sentinel filter value meaning "show all branches". */
 const ALL_BRANCHES = '__all__';
 
-/** Messages posted from the webview back to the extension. */
-interface OpenCommitMessage {
-  readonly type: 'openCommit';
+/** A changed file as sent to the webview's commit-detail panel. */
+interface DetailFile {
+  readonly path: string;
+  readonly name: string;
+  readonly dir: string;
+}
+
+/** Commit detail (metadata + changed files) sent to the webview on demand. */
+interface CommitDetailPayload {
+  readonly type: 'commitDetail';
   readonly hash: string;
+  readonly short: string;
+  readonly parents: string[];
+  readonly author: string;
+  readonly email: string;
+  readonly date: string;
+  readonly message: string;
+  readonly files: DetailFile[];
+}
+
+/** Messages posted from the webview back to the extension. */
+interface RequestCommitDetailMessage {
+  readonly type: 'requestCommitDetail';
+  readonly hash: string;
+}
+
+interface OpenFileMessage {
+  readonly type: 'openFile';
+  readonly hash: string;
+  readonly index: number;
 }
 
 interface SetBranchMessage {
@@ -54,9 +80,16 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-function isOpenCommitMessage(value: unknown): value is OpenCommitMessage {
+function isRequestCommitDetailMessage(value: unknown): value is RequestCommitDetailMessage {
   const record = asRecord(value);
-  return record?.type === 'openCommit' && typeof record.hash === 'string';
+  return record?.type === 'requestCommitDetail' && typeof record.hash === 'string';
+}
+
+function isOpenFileMessage(value: unknown): value is OpenFileMessage {
+  const record = asRecord(value);
+  return record?.type === 'openFile'
+    && typeof record.hash === 'string'
+    && typeof record.index === 'number';
 }
 
 function isSetBranchMessage(value: unknown): value is SetBranchMessage {
@@ -87,15 +120,23 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   /** Whether remote-tracking branches are included. */
   private showRemote = true;
 
+  /** Cache of resolved commit diffs, keyed by commit hash, for file opening. */
+  private readonly diffCache = new Map<string, CommitDiff>();
+
   /**
    * @param gitApi Source of commit history.
-   * @param onOpenCommit Invoked with a commit hash when the user clicks a row.
+   * @param onOpenFile Invoked when the user clicks a changed file in a commit's
+   *        detail panel; opens that file's pretty diff (parent vs commit).
    * @param extensionUri Base URI of the extension, used to resolve the tab icon.
    * @param maxCommits Upper bound on commits to load.
    */
   constructor(
     private readonly gitApi: GitApi,
-    private readonly onOpenCommit: (hash: string) => void,
+    private readonly onOpenFile: (
+      baseRef: string,
+      commitRef: string,
+      file: CommitDiffFile,
+    ) => void,
     private readonly extensionUri: vscode.Uri,
     private readonly maxCommits = 200,
   ) {
@@ -132,8 +173,10 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
 
     this.panelDisposables.push(
       panel.webview.onDidReceiveMessage((message: unknown) => {
-        if (isOpenCommitMessage(message)) {
-          this.onOpenCommit(message.hash);
+        if (isRequestCommitDetailMessage(message)) {
+          void this.sendCommitDetail(message.hash);
+        } else if (isOpenFileMessage(message)) {
+          void this.openFile(message.hash, message.index);
         } else if (isSetBranchMessage(message)) {
           this.branchFilter = message.branch;
           void this.render();
@@ -160,6 +203,10 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
     if (panel === undefined) {
       return;
     }
+
+    // Repository state may have changed; drop cached diffs so detail panels
+    // re-fetch fresh data on next expand.
+    this.diffCache.clear();
 
     const branchInfos = await this.gitApi.listBranches(this.showRemote);
     const branchNames = branchInfos.map((b) => b.name);
@@ -201,6 +248,61 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
     });
 
     panel.webview.html = renderHtml(panel.webview, rows, layout.columns, controls);
+  }
+
+  /** Resolves a commit's diff once, caching it for later file opening. */
+  private async resolveDiff(hash: string): Promise<CommitDiff> {
+    const cached = this.diffCache.get(hash);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const diff = await this.gitApi.getCommitDiff(hash);
+    this.diffCache.set(hash, diff);
+    return diff;
+  }
+
+  /** Fetches commit metadata + changed files and posts them to the webview. */
+  private async sendCommitDetail(hash: string): Promise<void> {
+    const panel = this.panel;
+    if (panel === undefined) {
+      return;
+    }
+    const [commit, diff] = await Promise.all([
+      this.gitApi.getCommit(hash),
+      this.resolveDiff(hash),
+    ]);
+
+    const files: DetailFile[] = diff.files.map((file) => {
+      const path = file.relativePath;
+      const slash = path.lastIndexOf('/');
+      return {
+        path,
+        name: slash === -1 ? path : path.slice(slash + 1),
+        dir: slash === -1 ? '' : path.slice(0, slash),
+      };
+    });
+
+    const payload: CommitDetailPayload = {
+      type: 'commitDetail',
+      hash,
+      short: hash.slice(0, 8),
+      parents: commit?.parents ?? [],
+      author: commit?.authorName ?? '',
+      email: commit?.authorEmail ?? '',
+      date: commit?.authorDate ? formatDateTime(commit.authorDate) : '',
+      message: commit?.message?.trim() ?? '',
+      files,
+    };
+    void panel.webview.postMessage(payload);
+  }
+
+  /** Opens the pretty diff for the file at `index` within commit `hash`. */
+  private async openFile(hash: string, index: number): Promise<void> {
+    const diff = await this.resolveDiff(hash);
+    const file = diff.files[index];
+    if (file !== undefined) {
+      this.onOpenFile(diff.baseRef, diff.commitRef, file);
+    }
   }
 
   private closePanel(): void {
@@ -379,6 +481,73 @@ function renderHtml(
   .badge.tag { background: rgba(82,180,85,0.18); border-color: #52b455; color: var(--vscode-foreground); }
   .badge.current { background: #4e94ce; border-color: #4e94ce; color: #ffffff; font-weight: 600; }
   .subject { vertical-align: middle; }
+  .detail {
+    display: none;
+    position: relative;
+    z-index: 2;
+    /* Transparent background so the graph lanes (drawn behind) remain visible
+       in the left gutter while a commit is expanded. */
+    background: transparent;
+  }
+  .detail-inner {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    /* Indent past the graph lane so lines stay visible on the left. */
+    margin-left: 60px;
+    min-height: 120px;
+    background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    border-left: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+  }
+  .detail-meta {
+    flex: 1 1 50%;
+    min-width: 0;
+    padding: 10px 14px;
+    overflow: auto;
+    border-right: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+  }
+  .detail-files {
+    flex: 1 1 50%;
+    min-width: 0;
+    padding: 6px 0;
+    overflow: auto;
+  }
+  .detail-meta .k { color: var(--vscode-descriptionForeground); }
+  .detail-meta .mono {
+    font-family: var(--vscode-editor-font-family, monospace);
+    word-break: break-all;
+  }
+  .detail-meta .line { margin-bottom: 4px; }
+  .detail-meta .msg {
+    margin-top: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .detail-loading { padding: 12px 14px; color: var(--vscode-descriptionForeground); }
+  .detail-files .files-head {
+    padding: 2px 14px 6px;
+    color: var(--vscode-descriptionForeground);
+    font-weight: 600;
+  }
+  .file-item {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .file-item:hover { background: var(--vscode-list-hoverBackground); }
+  .file-item .fname { text-overflow: ellipsis; overflow: hidden; }
+  .file-item .fdir {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
   #empty {
     display: none;
     padding: 16px 12px;
@@ -436,18 +605,29 @@ function renderHtml(
   var rowsEl = document.getElementById('rows');
   var graphWrap = document.getElementById('graphWrap');
   var rowEls = [];
+  var detailEls = [];
 
-  // ---- Graph SVG (drawn once; independent of column layout) ----
-  (function drawGraph() {
+  // ---- Graph SVG ----
+  // Node/line vertical positions are measured from the actual row elements, so
+  // expanding a commit-detail panel (which pushes rows down) keeps the lanes
+  // aligned and lets a lane continue straight through the expanded gap.
+  function centerY(i) {
+    var el = rowEls[i];
+    return el ? el.offsetTop + ROW_H / 2 : rowY(i);
+  }
+  function drawGraph() {
     var svgNs = 'http://www.w3.org/2000/svg';
     var svg = document.getElementById('graph');
+    while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+    var h = rowsEl.offsetHeight || totalHeight;
     svg.setAttribute('width', String(graphNatural));
-    svg.setAttribute('height', String(totalHeight));
+    svg.setAttribute('height', String(h));
+    graphWrap.style.height = h + 'px';
     DATA.rows.forEach(function (row, i) {
       for (var j = 0; j < row.lines.length; j++) {
         var line = row.lines[j];
-        var x1 = colX(line.fromCol), y1 = rowY(i - 1);
-        var x2 = colX(line.toCol), y2 = rowY(i);
+        var x1 = colX(line.fromCol), y1 = centerY(i - 1);
+        var x2 = colX(line.toCol), y2 = centerY(i);
         var midY = (y1 + y2) / 2;
         var d = x1 === x2
           ? 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2
@@ -463,14 +643,14 @@ function renderHtml(
     DATA.rows.forEach(function (row, i) {
       var circle = document.createElementNS(svgNs, 'circle');
       circle.setAttribute('cx', String(colX(row.col)));
-      circle.setAttribute('cy', String(rowY(i)));
+      circle.setAttribute('cy', String(centerY(i)));
       circle.setAttribute('r', String(R));
       circle.setAttribute('fill', PALETTE[row.color % PALETTE.length]);
       circle.setAttribute('stroke', 'var(--vscode-editor-background)');
       circle.setAttribute('stroke-width', '1.5');
       svg.appendChild(circle);
     });
-  })();
+  }
 
   // ---- Layout application (widths + graph overlay position) ----
   // Description is the flexible column (grows/shrinks with the window); the
@@ -494,8 +674,12 @@ function renderHtml(
     graphWrap.style.height = totalHeight + 'px';
   }
   // Re-measure the graph overlay when the window (panel) is resized so the
-  // flexible Description column reflows correctly.
-  window.addEventListener('resize', applyLayout);
+  // flexible Description column reflows correctly. Also redraw the graph so its
+  // height stays correct when a detail panel is expanded.
+  window.addEventListener('resize', function () {
+    applyLayout();
+    if (typeof drawGraph === 'function') { drawGraph(); }
+  });
 
   // ---- Cell content per column ----
   function fillCell(cell, id, row) {
@@ -566,11 +750,17 @@ function renderHtml(
     for (var i = 0; i < els.length; i++) { els[i].classList.remove('drop-target'); }
   }
 
-  // ---- Build rows ----
+  // ---- Build rows (each commit row is followed by a hidden detail panel) ----
+  var hashToIndex = {};
+  var openIndex = -1;
   function buildRows() {
     rowsEl.textContent = '';
     rowEls = [];
-    DATA.rows.forEach(function (row) {
+    detailEls = [];
+    hashToIndex = {};
+    openIndex = -1;
+    DATA.rows.forEach(function (row, i) {
+      hashToIndex[row.hash] = i;
       var rowEl = document.createElement('div');
       rowEl.className = 'row';
       rowEl.title = row.hash;
@@ -580,15 +770,118 @@ function renderHtml(
         fillCell(cell, id, row);
         rowEl.appendChild(cell);
       });
-      rowEl.addEventListener('click', function () {
-        vscode.postMessage({ type: 'openCommit', hash: row.hash });
-      });
+      rowEl.addEventListener('click', function () { toggleDetail(i, row); });
       rowsEl.appendChild(rowEl);
       rowEls.push(rowEl);
+
+      var detail = document.createElement('div');
+      detail.className = 'detail';
+      rowsEl.appendChild(detail);
+      detailEls.push(detail);
     });
   }
 
-  function rebuild() { buildHeader(); buildRows(); applyLayout(); }
+  // ---- Commit detail panel ----
+  function toggleDetail(i, row) {
+    var d = detailEls[i];
+    if (d.style.display === 'block') {
+      d.style.display = 'none';
+      openIndex = -1;
+      drawGraph();
+      return;
+    }
+    if (openIndex !== -1 && detailEls[openIndex]) {
+      detailEls[openIndex].style.display = 'none';
+    }
+    openIndex = i;
+    d.textContent = '';
+    var loading = document.createElement('div');
+    loading.className = 'detail-loading';
+    loading.textContent = 'Loading changes\\u2026';
+    d.appendChild(loading);
+    d.style.display = 'block';
+    drawGraph();
+    vscode.postMessage({ type: 'requestCommitDetail', hash: row.hash });
+  }
+
+  function metaLine(key, valueNode) {
+    var line = document.createElement('div');
+    line.className = 'line';
+    var k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = key + ' ';
+    line.appendChild(k);
+    line.appendChild(valueNode);
+    return line;
+  }
+  function textSpan(text, cls) {
+    var s = document.createElement('span');
+    if (cls) { s.className = cls; }
+    s.textContent = text;
+    return s;
+  }
+
+  function renderDetail(detail) {
+    var i = hashToIndex[detail.hash];
+    if (i === undefined) { return; }
+    var d = detailEls[i];
+    d.textContent = '';
+
+    var inner = document.createElement('div');
+    inner.className = 'detail-inner';
+
+    // Left: metadata.
+    var meta = document.createElement('div');
+    meta.className = 'detail-meta';
+    meta.appendChild(metaLine('Commit:', textSpan(detail.hash, 'mono')));
+    if (detail.parents.length) {
+      meta.appendChild(metaLine('Parents:', textSpan(detail.parents.join(', '), 'mono')));
+    }
+    var who = detail.author + (detail.email ? ' <' + detail.email + '>' : '');
+    if (who.trim()) { meta.appendChild(metaLine('Author:', textSpan(who))); }
+    if (detail.date) { meta.appendChild(metaLine('Date:', textSpan(detail.date))); }
+    if (detail.message) {
+      var msg = document.createElement('div');
+      msg.className = 'msg';
+      msg.textContent = detail.message;
+      meta.appendChild(msg);
+    }
+    inner.appendChild(meta);
+
+    // Right: changed files.
+    var filesWrap = document.createElement('div');
+    filesWrap.className = 'detail-files';
+    var head = document.createElement('div');
+    head.className = 'files-head';
+    head.textContent = detail.files.length + (detail.files.length === 1 ? ' file changed' : ' files changed');
+    filesWrap.appendChild(head);
+    detail.files.forEach(function (file, index) {
+      var item = document.createElement('div');
+      item.className = 'file-item';
+      item.title = file.path;
+      item.appendChild(textSpan(file.name, 'fname'));
+      if (file.dir) { item.appendChild(textSpan(file.dir, 'fdir')); }
+      item.addEventListener('click', function (e) {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'openFile', hash: detail.hash, index: index });
+      });
+      filesWrap.appendChild(item);
+    });
+    if (detail.files.length === 0) {
+      filesWrap.appendChild(textSpan('No file changes.', 'detail-loading'));
+    }
+    inner.appendChild(filesWrap);
+
+    d.appendChild(inner);
+    drawGraph();
+  }
+
+  window.addEventListener('message', function (e) {
+    var msg = e.data;
+    if (msg && msg.type === 'commitDetail') { renderDetail(msg); }
+  });
+
+  function rebuild() { buildHeader(); buildRows(); applyLayout(); drawGraph(); }
 
   // ---- Toolbar: branch filter + remote toggle ----
   (function buildToolbar() {

@@ -29,8 +29,8 @@ documents.
 - **Right-click anywhere** — "Open Changes with GitLineDiff" from the Source
   Control changes list, the Explorer, or an editor tab (HEAD vs working tree).
 - **Commit graph** — a full-width visual history graph that opens in the editor
-  area (via a status-bar button or the view toolbar); click a commit to open its
-  multi-file pretty diff against its parent.
+  area (via a status-bar button or the view toolbar); click a commit to expand
+  its details and changed files, then open any file as a pretty diff.
 - **Auto-refresh** — the views and open diffs update when the repo *or* the
   settings change.
 
@@ -45,9 +45,10 @@ pretty diff; files without one open as an ordinary diff.
   Control changes list, the Explorer, or the editor tab context menu.
 - **Commit graph** — open it with the **GitLineDiff Graph** status-bar button,
   the graph icon in the GitLineDiff view toolbar, or **"GitLineDiff: Open Commit
-  Graph"** from the Command Palette. Then click any commit to open its
-  multi-file diff vs its parent. (You can also run **"GitLineDiff: Open Commit
-  Diff"** to pick a commit from a list.)
+  Graph"** from the Command Palette. Click any commit to expand an inline detail
+  panel (commit metadata + changed files), then click a file to open its pretty
+  diff vs the parent revision. (You can also run **"GitLineDiff: Open Commit
+  Diff"** to pick a commit from a list and open all its files at once.)
 
 ### The commit graph
 

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { GitApi } from './gitApi';
+import { GitApi, type CommitDiffFile } from './gitApi';
 import { buildRegistry, FormatterRegistry } from './formatterRegistry';
 import { ChangedFileItem, GitLineDiffTreeProvider, OPEN_DIFF_COMMAND } from './treeView';
 import { readConfig, affectsConfig } from './config';
@@ -201,11 +201,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
-  // Commit-graph panel (opens full-width in the editor area on demand).
+  // Opens a single file's pretty diff for a commit (parent revision vs commit).
+  const openCommitFile = async (
+    baseRef: string,
+    commitRef: string,
+    file: CommitDiffFile,
+  ): Promise<void> => {
+    const leftUri = PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, baseRef);
+    const rightUri = PrettyDiffContentProvider.buildUri(file.uri.fsPath, commitRef);
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      leftUri,
+      rightUri,
+      `GitLineDiff: ${basename(file.uri.fsPath)} @ ${commitRef.slice(0, 7)}`,
+    );
+  };
+
+  // Commit-graph panel (opens full-width in the editor area on demand). Clicking
+  // a commit expands an inline detail panel; clicking a file opens its pretty diff.
   const graphPanel = new GitLineDiffGraphPanel(
     gitApi,
-    (hash) => {
-      void openCommitDiff(hash);
+    (baseRef, commitRef, file) => {
+      void openCommitFile(baseRef, commitRef, file);
     },
     context.extensionUri,
   );

@@ -294,6 +294,19 @@ export class GitApi implements vscode.Disposable {
     return map;
   }
 
+  /** Returns a commit's metadata, or `undefined` if unavailable. */
+  public async getCommit(ref: string): Promise<Commit | undefined> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return undefined;
+    }
+    try {
+      return await repository.getCommit(ref);
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Resolves the changed files of a commit relative to its first parent (or the
    * empty tree for the root commit).
