@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { API, GitExtension, Repository, Change, Commit } from './git';
+import { RefType } from './git';
+import type { API, GitExtension, Repository, Change, Commit, Ref } from './git';
 
 /** Identifier of the built-in VS Code Git extension. */
 const GIT_EXTENSION_ID = 'vscode.git';
@@ -21,6 +22,14 @@ export interface CommitDiffFile {
   readonly uri: vscode.Uri;
   /** Path relative to the repository root, for display. */
   readonly relativePath: string;
+}
+
+/** A ref label attached to a commit, for rendering badges in the graph. */
+export interface RefLabel {
+  readonly name: string;
+  readonly kind: 'head' | 'remote' | 'tag';
+  /** True for the local branch currently checked out (HEAD). */
+  readonly current: boolean;
 }
 
 /** The resolved diff for a commit: its base ref plus the changed files. */
@@ -170,6 +179,54 @@ export class GitApi implements vscode.Disposable {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Builds a map from commit hash to the ref labels (branches, remote branches,
+   * tags) pointing at it, for rendering badges in the graph.
+   */
+  public async getRefsByCommit(): Promise<Map<string, RefLabel[]>> {
+    const map = new Map<string, RefLabel[]>();
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return map;
+    }
+
+    const currentBranch = repository.state.HEAD?.name;
+    let refs: Ref[];
+    try {
+      refs = await repository.getRefs();
+    } catch {
+      return map;
+    }
+
+    for (const ref of refs) {
+      if (ref.commit === undefined || ref.name === undefined) {
+        continue;
+      }
+      const kind: RefLabel['kind'] =
+        ref.type === RefType.Tag
+          ? 'tag'
+          : ref.type === RefType.RemoteHead
+            ? 'remote'
+            : 'head';
+      const label: RefLabel = {
+        name: ref.name,
+        kind,
+        current: kind === 'head' && ref.name === currentBranch,
+      };
+      const list = map.get(ref.commit) ?? [];
+      list.push(label);
+      map.set(ref.commit, list);
+    }
+
+    // Order labels: current branch, other branches, remotes, then tags.
+    const rank = (label: RefLabel): number =>
+      label.current ? 0 : label.kind === 'head' ? 1 : label.kind === 'remote' ? 2 : 3;
+    for (const list of map.values()) {
+      list.sort((a, b) => rank(a) - rank(b));
+    }
+    return map;
   }
 
   /**

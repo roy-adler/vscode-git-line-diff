@@ -58,6 +58,19 @@ gated behind a proposed API that installed extensions can't use. Owning the
 panel lets us put the pretty diff one click away from any commit. Diffs are
 commit-vs-first-parent (the root commit is compared against the empty tree).
 
+The panel is laid out as a table with **resizable and reorderable columns**:
+
+| Column | Contents |
+| --- | --- |
+| **Graph** | Branch/merge lanes with a node per commit. |
+| **Description** | Branch/remote/tag badges (current branch highlighted) + commit subject. |
+| **Date** | Author date and time. |
+| **Author** | Author name. |
+| **Commit** | Short commit hash. |
+
+Drag a column's right edge to **resize** it, or drag a column header onto
+another to **reorder** columns. Your layout is remembered across sessions.
+
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs
 > there unchanged — press <kbd>F5</kbd> to debug or install the `.vsix`

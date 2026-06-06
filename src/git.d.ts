@@ -82,6 +82,29 @@ export interface LogOptions {
   readonly maxEntries?: number;
 }
 
+/** The kind of a git ref. Mirrors the Git extension's `RefType`. */
+export const enum RefType {
+  Head,
+  RemoteHead,
+  Tag,
+}
+
+/** A git ref (local branch, remote-tracking branch, or tag). */
+export interface Ref {
+  readonly type: RefType;
+  readonly name?: string;
+  /** Full commit hash the ref points at. */
+  readonly commit?: string;
+  readonly remote?: string;
+}
+
+/** Query accepted by {@link Repository.getRefs}. */
+export interface RefQuery {
+  readonly contains?: string;
+  readonly count?: number;
+  readonly pattern?: string;
+}
+
 export interface Repository {
   /** Filesystem root of the repository. */
   readonly rootUri: Uri;
@@ -107,6 +130,9 @@ export interface Repository {
    * (path at `ref2`), accounting for renames.
    */
   diffBetween(ref1: string, ref2: string): Promise<Change[]>;
+
+  /** Returns the repository's refs (branches, remote branches, tags). */
+  getRefs(query?: RefQuery): Promise<Ref[]>;
 }
 
 /** The Git extension API (version 1). */
