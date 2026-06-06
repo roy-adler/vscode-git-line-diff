@@ -18,18 +18,55 @@ interface GraphRowData {
   readonly refs: RefLabel[];
 }
 
+/** Toolbar state passed to the webview to initialise the filter controls. */
+interface GraphControls {
+  /** Branch names available in the dropdown (excludes the "all" sentinel). */
+  readonly branches: string[];
+  /** Currently selected filter: a branch name or {@link ALL_BRANCHES}. */
+  readonly branchFilter: string;
+  /** Whether remote-tracking branches are shown. */
+  readonly showRemote: boolean;
+}
+
+/** Sentinel filter value meaning "show all branches". */
+const ALL_BRANCHES = '__all__';
+
 /** Messages posted from the webview back to the extension. */
 interface OpenCommitMessage {
   readonly type: 'openCommit';
   readonly hash: string;
 }
 
-function isOpenCommitMessage(value: unknown): value is OpenCommitMessage {
+interface SetBranchMessage {
+  readonly type: 'setBranch';
+  readonly branch: string;
+}
+
+interface SetShowRemoteMessage {
+  readonly type: 'setShowRemote';
+  readonly value: boolean;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null) {
-    return false;
+    return undefined;
   }
-  const record = value as Record<string, unknown>;
-  return record.type === 'openCommit' && typeof record.hash === 'string';
+  return value as Record<string, unknown>;
+}
+
+function isOpenCommitMessage(value: unknown): value is OpenCommitMessage {
+  const record = asRecord(value);
+  return record?.type === 'openCommit' && typeof record.hash === 'string';
+}
+
+function isSetBranchMessage(value: unknown): value is SetBranchMessage {
+  const record = asRecord(value);
+  return record?.type === 'setBranch' && typeof record.branch === 'string';
+}
+
+function isSetShowRemoteMessage(value: unknown): value is SetShowRemoteMessage {
+  const record = asRecord(value);
+  return record?.type === 'setShowRemote' && typeof record.value === 'boolean';
 }
 
 /**
@@ -44,6 +81,11 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   /** Disposables tied to the currently-open panel. */
   private panelDisposables: vscode.Disposable[] = [];
+
+  /** Branch filter: a branch name, or {@link ALL_BRANCHES}. */
+  private branchFilter: string = ALL_BRANCHES;
+  /** Whether remote-tracking branches are included. */
+  private showRemote = true;
 
   /**
    * @param gitApi Source of commit history.
@@ -92,6 +134,12 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       panel.webview.onDidReceiveMessage((message: unknown) => {
         if (isOpenCommitMessage(message)) {
           this.onOpenCommit(message.hash);
+        } else if (isSetBranchMessage(message)) {
+          this.branchFilter = message.branch;
+          void this.render();
+        } else if (isSetShowRemoteMessage(message)) {
+          this.showRemote = message.value;
+          void this.render();
         }
       }),
       panel.onDidDispose(() => this.closePanel()),
@@ -113,10 +161,29 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       return;
     }
 
+    const branchInfos = await this.gitApi.listBranches(this.showRemote);
+    const branchNames = branchInfos.map((b) => b.name);
+
+    // If the selected branch is no longer available (e.g. remotes were just
+    // hidden), fall back to showing all branches.
+    if (this.branchFilter !== ALL_BRANCHES && !branchNames.includes(this.branchFilter)) {
+      this.branchFilter = ALL_BRANCHES;
+    }
+
+    // "Show all" logs from every visible branch tip; otherwise log the one
+    // selected branch. An empty list falls back to HEAD inside the Git API.
+    const refNames =
+      this.branchFilter === ALL_BRANCHES ? branchNames : [this.branchFilter];
+
     const [commits, refsByCommit] = await Promise.all([
-      this.gitApi.getRecentCommits(this.maxCommits),
-      this.gitApi.getRefsByCommit(),
+      this.gitApi.getRecentCommits(this.maxCommits, refNames),
+      this.gitApi.getRefsByCommit(this.showRemote),
     ]);
+    const controls: GraphControls = {
+      branches: branchNames,
+      branchFilter: this.branchFilter,
+      showRemote: this.showRemote,
+    };
     const layout = computeGraphLayout(commits);
     const rows: GraphRowData[] = layout.rows.map((row, index) => {
       const commit = commits[index];
@@ -133,7 +200,7 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       };
     });
 
-    panel.webview.html = renderHtml(panel.webview, rows, layout.columns);
+    panel.webview.html = renderHtml(panel.webview, rows, layout.columns, controls);
   }
 
   private closePanel(): void {
@@ -188,17 +255,10 @@ function renderHtml(
   webview: vscode.Webview,
   rows: GraphRowData[],
   columns: number,
+  controls: GraphControls,
 ): string {
   const nonce = makeNonce();
-  const data = JSON.stringify({ rows, columns });
-
-  if (rows.length === 0) {
-    return `<!DOCTYPE html><html><head><meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy"
-  content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline';" />
-<style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:12px;}</style>
-</head><body><p>No commits to display.</p></body></html>`;
-  }
+  const data = JSON.stringify({ rows, columns, controls });
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -217,9 +277,37 @@ function renderHtml(
     background: var(--vscode-editor-background);
     user-select: none;
   }
-  #header {
+  #toolbar {
     position: sticky;
     top: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    white-space: nowrap;
+  }
+  #toolbar .label { color: var(--vscode-descriptionForeground); }
+  #toolbar select {
+    height: 24px;
+    color: var(--vscode-dropdown-foreground);
+    background: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border, transparent);
+    border-radius: 3px;
+    padding: 0 6px;
+  }
+  #toolbar label.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  #header {
+    position: sticky;
+    top: 36px;
     z-index: 3;
     display: grid;
     height: 28px;
@@ -291,14 +379,25 @@ function renderHtml(
   .badge.tag { background: rgba(82,180,85,0.18); border-color: #52b455; color: var(--vscode-foreground); }
   .badge.current { background: #4e94ce; border-color: #4e94ce; color: #ffffff; font-weight: 600; }
   .subject { vertical-align: middle; }
+  #empty {
+    display: none;
+    padding: 16px 12px;
+    color: var(--vscode-descriptionForeground);
+  }
 </style>
 </head>
 <body>
+<div id="toolbar">
+  <span class="label">Branches:</span>
+  <select id="branchSelect" title="Filter the graph by branch"></select>
+  <label class="check"><input type="checkbox" id="remoteToggle" /> Show Remote Branches</label>
+</div>
 <div id="header"></div>
 <div id="body">
   <div id="graphWrap"><svg id="graph"></svg></div>
   <div id="rows"></div>
 </div>
+<div id="empty">No commits to display for the current filter.</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const DATA = ${data};
@@ -491,6 +590,32 @@ function renderHtml(
 
   function rebuild() { buildHeader(); buildRows(); applyLayout(); }
 
+  // ---- Toolbar: branch filter + remote toggle ----
+  (function buildToolbar() {
+    var ctrl = DATA.controls || { branches: [], branchFilter: '__all__', showRemote: true };
+    var select = document.getElementById('branchSelect');
+    var allOpt = document.createElement('option');
+    allOpt.value = '__all__';
+    allOpt.textContent = 'Show All';
+    select.appendChild(allOpt);
+    for (var i = 0; i < ctrl.branches.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = ctrl.branches[i];
+      opt.textContent = ctrl.branches[i];
+      select.appendChild(opt);
+    }
+    select.value = ctrl.branchFilter;
+    select.addEventListener('change', function () {
+      vscode.postMessage({ type: 'setBranch', branch: select.value });
+    });
+
+    var toggle = document.getElementById('remoteToggle');
+    toggle.checked = !!ctrl.showRemote;
+    toggle.addEventListener('change', function () {
+      vscode.postMessage({ type: 'setShowRemote', value: toggle.checked });
+    });
+  })();
+
   // ---- Resize handling ----
   var resizing = null;
   function startResize(e, id) {
@@ -517,7 +642,14 @@ function renderHtml(
     rebuild();
   }
 
-  rebuild();
+  if (DATA.rows.length === 0) {
+    // Keep the toolbar usable so the user can widen the filter again.
+    document.getElementById('header').style.display = 'none';
+    document.getElementById('body').style.display = 'none';
+    document.getElementById('empty').style.display = 'block';
+  } else {
+    rebuild();
+  }
 </script>
 </body>
 </html>`;

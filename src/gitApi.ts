@@ -24,6 +24,16 @@ export interface CommitDiffFile {
   readonly relativePath: string;
 }
 
+/** A branch entry for the graph's branch-filter dropdown. */
+export interface BranchInfo {
+  /** Branch name (short for local, `remote/name` for remotes). */
+  readonly name: string;
+  /** True for a remote-tracking branch. */
+  readonly remote: boolean;
+  /** True for the currently checked-out branch (HEAD). */
+  readonly current: boolean;
+}
+
 /** A ref label attached to a commit, for rendering badges in the graph. */
 export interface RefLabel {
   readonly name: string;
@@ -168,24 +178,76 @@ export class GitApi implements vscode.Disposable {
     return this.readRef(HEAD_REF, uri);
   }
 
-  /** Returns recent commits (most recent first), or `[]` if unavailable. */
-  public async getRecentCommits(maxEntries = 50): Promise<Commit[]> {
+  /**
+   * Returns recent commits (most recent first), or `[]` if unavailable.
+   *
+   * @param maxEntries Maximum number of commits to return.
+   * @param refNames   Revisions to log from (branch names). When omitted or
+   *                   empty, logs from `HEAD`. Pass multiple branch tips to get
+   *                   a unified "show all branches" history.
+   */
+  public async getRecentCommits(maxEntries = 50, refNames?: string[]): Promise<Commit[]> {
     const repository = this.getPrimaryRepository();
     if (repository === undefined) {
       return [];
     }
+    const refs = refNames !== undefined && refNames.length > 0 ? refNames : undefined;
     try {
-      return await repository.log({ maxEntries });
+      return await repository.log({ maxEntries, refNames: refs });
+    } catch {
+      // Some Git API builds reject unknown refNames; fall back to HEAD history.
+      try {
+        return await repository.log({ maxEntries });
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  /**
+   * Lists the repository's branches for the graph's branch filter.
+   *
+   * @param includeRemote When `true`, remote-tracking branches are included.
+   * @returns Branch entries (most relevant first), or `[]` if unavailable.
+   */
+  public async listBranches(includeRemote: boolean): Promise<BranchInfo[]> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return [];
+    }
+    const currentBranch = repository.state.HEAD?.name;
+    let refs: Ref[];
+    try {
+      refs = await repository.getRefs({});
     } catch {
       return [];
     }
+
+    const branches: BranchInfo[] = [];
+    for (const ref of refs) {
+      if (ref.name === undefined) {
+        continue;
+      }
+      if (ref.type === RefType.Head) {
+        branches.push({ name: ref.name, remote: false, current: ref.name === currentBranch });
+      } else if (ref.type === RefType.RemoteHead && includeRemote) {
+        branches.push({ name: ref.name, remote: true, current: false });
+      }
+    }
+
+    // Current branch first, then local branches, then remotes; alphabetical within groups.
+    const rank = (b: BranchInfo): number => (b.current ? 0 : b.remote ? 2 : 1);
+    branches.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    return branches;
   }
 
   /**
    * Builds a map from commit hash to the ref labels (branches, remote branches,
    * tags) pointing at it, for rendering badges in the graph.
+   *
+   * @param includeRemote When `false`, remote-tracking branch labels are omitted.
    */
-  public async getRefsByCommit(): Promise<Map<string, RefLabel[]>> {
+  public async getRefsByCommit(includeRemote = true): Promise<Map<string, RefLabel[]>> {
     const map = new Map<string, RefLabel[]>();
     const repository = this.getPrimaryRepository();
     if (repository === undefined) {
@@ -195,13 +257,16 @@ export class GitApi implements vscode.Disposable {
     const currentBranch = repository.state.HEAD?.name;
     let refs: Ref[];
     try {
-      refs = await repository.getRefs();
+      refs = await repository.getRefs({});
     } catch {
       return map;
     }
 
     for (const ref of refs) {
       if (ref.commit === undefined || ref.name === undefined) {
+        continue;
+      }
+      if (ref.type === RefType.RemoteHead && !includeRemote) {
         continue;
       }
       const kind: RefLabel['kind'] =

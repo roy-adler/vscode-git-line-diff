@@ -80,6 +80,11 @@ export interface Commit {
 export interface LogOptions {
   /** Maximum number of commits to return. */
   readonly maxEntries?: number;
+  /**
+   * Revisions to log from (e.g. branch names). When omitted, logs from `HEAD`.
+   * Multiple refs produce a unified history across those tips.
+   */
+  readonly refNames?: string[];
 }
 
 /** The kind of a git ref. Mirrors the Git extension's `RefType`. */

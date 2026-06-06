@@ -71,6 +71,13 @@ The panel is laid out as a table with **resizable and reorderable columns**:
 Drag a column's right edge to **resize** it, or drag a column header onto
 another to **reorder** columns. Your layout is remembered across sessions.
 
+A toolbar above the table gives you a **full git view**:
+
+- **Branches** dropdown — choose **Show All** to see every branch's history in a
+  single unified graph, or pick one branch to focus on just its commits.
+- **Show Remote Branches** — toggle whether remote-tracking branches appear in
+  both the graph (as badges and history) and the Branches dropdown.
+
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs
 > there unchanged — press <kbd>F5</kbd> to debug or install the `.vsix`
