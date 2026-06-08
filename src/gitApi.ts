@@ -114,6 +114,19 @@ export class GitApi implements vscode.Disposable {
     return true;
   }
 
+  /** Whether the built-in Git API has been acquired. */
+  public isInitialized(): boolean {
+    return this.api !== undefined;
+  }
+
+  /** Acquires the Git API if not already initialized. */
+  public async ensureInitialized(): Promise<boolean> {
+    if (this.api !== undefined) {
+      return true;
+    }
+    return this.initialize();
+  }
+
   /**
    * Returns the first available repository, or `undefined` if none is open.
    *

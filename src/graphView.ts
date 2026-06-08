@@ -443,6 +443,44 @@ function renderHtml(
     gap: 6px;
     cursor: pointer;
   }
+  .toolbar-spacer { flex: 1 1 auto; min-width: 8px; }
+  #searchWrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 300px;
+    flex: 0 1 300px;
+  }
+  #searchInput {
+    flex: 1;
+    min-width: 100px;
+    height: 24px;
+    padding: 0 6px;
+    color: var(--vscode-input-foreground);
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 3px;
+  }
+  #searchClear {
+    display: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    line-height: 20px;
+    text-align: center;
+    color: var(--vscode-foreground);
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  #searchClear:hover { background: var(--vscode-toolbar-hoverBackground); }
+  #searchCount {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+    min-width: 4em;
+  }
+  .row.filtered-out, .detail.filtered-out { display: none !important; }
   #header {
     position: sticky;
     top: 36px;
@@ -585,7 +623,7 @@ function renderHtml(
     text-overflow: ellipsis;
     overflow: hidden;
   }
-  #empty {
+  #empty, #noSearchResults {
     display: none;
     padding: 16px 12px;
     color: var(--vscode-descriptionForeground);
@@ -597,6 +635,12 @@ function renderHtml(
   <span class="label">Branches:</span>
   <select id="branchSelect" title="Filter the graph by branch"></select>
   <label class="check"><input type="checkbox" id="remoteToggle" /> Show Remote Branches</label>
+  <span class="toolbar-spacer"></span>
+  <div id="searchWrap">
+    <input type="search" id="searchInput" placeholder="Search commits\u2026" title="Search by message, author, hash, branch, or date (Ctrl+F / Cmd+F)" />
+    <button type="button" id="searchClear" title="Clear search" aria-label="Clear search">\u00d7</button>
+  </div>
+  <span id="searchCount"></span>
 </div>
 <div id="header"></div>
 <div id="body">
@@ -604,6 +648,7 @@ function renderHtml(
   <div id="rows"></div>
 </div>
 <div id="empty">No commits to display for the current filter.</div>
+<div id="noSearchResults">No commits match your search.</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const DATA = ${data};
@@ -636,7 +681,10 @@ function renderHtml(
     var stored = state.widths && state.widths[id];
     widths[id] = (typeof stored === 'number' && stored >= 40) ? stored : COLS[id].def;
   }
-  function saveState() { vscode.setState({ order: order, widths: widths }); }
+  var searchQuery = typeof state.search === 'string' ? state.search : '';
+  function saveState() {
+    vscode.setState({ order: order, widths: widths, search: searchQuery });
+  }
 
   var header = document.getElementById('header');
   var rowsEl = document.getElementById('rows');
@@ -652,6 +700,9 @@ function renderHtml(
     var el = rowEls[i];
     return el ? el.offsetTop + ROW_H / 2 : rowY(i);
   }
+  function isRowVisible(i) {
+    return rowEls[i] && !rowEls[i].classList.contains('filtered-out');
+  }
   function drawGraph() {
     var svgNs = 'http://www.w3.org/2000/svg';
     var svg = document.getElementById('graph');
@@ -661,6 +712,7 @@ function renderHtml(
     svg.setAttribute('height', String(h));
     graphWrap.style.height = h + 'px';
     DATA.rows.forEach(function (row, i) {
+      if (!isRowVisible(i) || !isRowVisible(i - 1)) { return; }
       for (var j = 0; j < row.lines.length; j++) {
         var line = row.lines[j];
         var x1 = colX(line.fromCol), y1 = centerY(i - 1);
@@ -678,6 +730,7 @@ function renderHtml(
       }
     });
     DATA.rows.forEach(function (row, i) {
+      if (!isRowVisible(i)) { return; }
       var circle = document.createElementNS(svgNs, 'circle');
       circle.setAttribute('cx', String(colX(row.col)));
       circle.setAttribute('cy', String(centerY(i)));
@@ -708,7 +761,7 @@ function renderHtml(
       graphWrap.style.left = gcell.offsetLeft + 'px';
       graphWrap.style.width = gcell.offsetWidth + 'px';
     }
-    graphWrap.style.height = totalHeight + 'px';
+    graphWrap.style.height = (rowsEl.offsetHeight || totalHeight) + 'px';
   }
   // Re-measure the graph overlay when the window (panel) is resized so the
   // flexible Description column reflows correctly. Also redraw the graph so its
@@ -936,9 +989,66 @@ function renderHtml(
     if (msg && msg.type === 'commitDetail') { renderDetail(msg); }
   });
 
-  function rebuild() { buildHeader(); buildRows(); applyLayout(); drawGraph(); }
+  // ---- Search ----
+  function rowMatches(row, q) {
+    var needle = q.toLowerCase();
+    if ((row.subject || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    if ((row.author || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    if ((row.date || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    if ((row.hash || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    if ((row.short || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    for (var r = 0; r < row.refs.length; r++) {
+      if ((row.refs[r].name || '').toLowerCase().indexOf(needle) !== -1) { return true; }
+    }
+    return false;
+  }
+  function applySearch() {
+    var q = searchQuery.trim();
+    var active = q.length > 0;
+    var visible = 0;
+    for (var i = 0; i < DATA.rows.length; i++) {
+      var match = !active || rowMatches(DATA.rows[i], q);
+      if (match) { visible++; }
+      rowEls[i].classList.toggle('filtered-out', !match);
+      if (!match) {
+        detailEls[i].classList.add('filtered-out');
+        detailEls[i].style.display = 'none';
+        if (openIndex === i) { openIndex = -1; }
+      } else {
+        detailEls[i].classList.remove('filtered-out');
+      }
+    }
+    var countEl = document.getElementById('searchCount');
+    if (countEl) {
+      countEl.textContent = active ? (visible + ' / ' + DATA.rows.length) : '';
+    }
+    var clearBtn = document.getElementById('searchClear');
+    if (clearBtn) {
+      clearBtn.style.display = active ? 'inline-block' : 'none';
+    }
+    var noResults = document.getElementById('noSearchResults');
+    var body = document.getElementById('body');
+    var hdr = document.getElementById('header');
+    if (active && visible === 0) {
+      if (noResults) { noResults.style.display = 'block'; }
+      if (body) { body.style.display = 'none'; }
+      if (hdr) { hdr.style.display = 'none'; }
+    } else {
+      if (noResults) { noResults.style.display = 'none'; }
+      if (body) { body.style.display = ''; }
+      if (hdr) { hdr.style.display = ''; }
+    }
+    drawGraph();
+  }
 
-  // ---- Toolbar: branch filter + remote toggle ----
+  function rebuild() {
+    buildHeader();
+    buildRows();
+    applyLayout();
+    applySearch();
+  }
+
+  // ---- Toolbar: branch filter + remote toggle + search ----
   (function buildToolbar() {
     var ctrl = DATA.controls || { branches: [], branchFilter: '__all__', showRemote: true };
     var select = document.getElementById('branchSelect');
@@ -961,6 +1071,34 @@ function renderHtml(
     toggle.checked = !!ctrl.showRemote;
     toggle.addEventListener('change', function () {
       vscode.postMessage({ type: 'setShowRemote', value: toggle.checked });
+    });
+
+    var searchInput = document.getElementById('searchInput');
+    searchInput.value = searchQuery;
+    searchInput.addEventListener('input', function () {
+      searchQuery = searchInput.value;
+      applySearch();
+      saveState();
+    });
+    document.getElementById('searchClear').addEventListener('click', function () {
+      searchQuery = '';
+      searchInput.value = '';
+      applySearch();
+      saveState();
+      searchInput.focus();
+    });
+    document.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+      }
+      if (e.key === 'Escape' && document.activeElement === searchInput && searchQuery) {
+        searchQuery = '';
+        searchInput.value = '';
+        applySearch();
+        saveState();
+      }
     });
   })();
 

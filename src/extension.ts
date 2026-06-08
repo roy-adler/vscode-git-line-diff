@@ -147,10 +147,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let registry = buildRegistry(readConfig());
   const getRegistry = (): FormatterRegistry => registry;
 
-  const ready = await gitApi.initialize();
+  const ready = await gitApi.ensureInitialized();
   if (!ready) {
-    void vscode.window.showWarningMessage(
-      'GitLineDiff: the built-in Git extension is not available.',
+    logChannel.appendLine(
+      'Git extension not ready at activation; will retry when it becomes available.',
     );
   }
 
@@ -243,7 +243,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   context.subscriptions.push(
     graphPanel,
-    vscode.commands.registerCommand(OPEN_GRAPH_COMMAND, () => graphPanel.show()),
+    vscode.commands.registerCommand(OPEN_GRAPH_COMMAND, async () => {
+      if (!(await gitApi.ensureInitialized()) || gitApi.getPrimaryRepository() === undefined) {
+        void vscode.window.showInformationMessage(
+          'GitLineDiff: open a folder with a git repository first.',
+        );
+        return;
+      }
+      graphPanel.show();
+    }),
   );
 
   // Status-bar button to open the graph (like Git Graph).
@@ -254,9 +262,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBarItem.text = '$(git-commit) GitLineDiff Graph';
   statusBarItem.tooltip = 'Open the GitLineDiff commit graph';
   statusBarItem.command = OPEN_GRAPH_COMMAND;
-  if (ready) {
-    statusBarItem.show();
+  // Show immediately; the graph command handles a missing repository gracefully.
+  statusBarItem.show();
+
+  const refreshGitIntegration = async (): Promise<void> => {
+    const ok = await gitApi.ensureInitialized();
+    if (ok) {
+      statusBarItem.show();
+      treeProvider.refresh();
+    }
+  };
+
+  // The built-in Git extension often activates only after the SCM view is opened.
+  // Retry when extensions change or repositories become available.
+  context.subscriptions.push(
+    vscode.extensions.onDidChange(() => {
+      void refreshGitIntegration();
+    }),
+    gitApi.onDidChange(() => {
+      statusBarItem.show();
+    }),
+  );
+  if (!ready) {
+    void refreshGitIntegration();
   }
+
   context.subscriptions.push(statusBarItem);
 
   // Command: open a pretty diff for the selected file. The argument shape

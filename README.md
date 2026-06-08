@@ -81,6 +81,8 @@ A toolbar above the table gives you a **full git view**:
 - **Double-click a branch badge** — check out that branch (local branches
   directly; remote-tracking branches check out an existing local branch or create
   one tracking the remote).
+- **Search** — filter commits by message, author, hash, branch/tag name, or date.
+  Use **Ctrl+F** / **Cmd+F** to focus the search box; **Escape** clears it.
 
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs

@@ -29,7 +29,9 @@
     "scm"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "extensionDependencies": [
     "vscode.git"
   ],
