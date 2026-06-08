@@ -133,7 +133,13 @@ class PrettyDiffContentProvider
   }
 }
 
+/** Diagnostic output channel (View → Output → "GitLineDiff"). */
+let logChannel: vscode.OutputChannel;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  logChannel = vscode.window.createOutputChannel('GitLineDiff');
+  context.subscriptions.push(logChannel);
+
   const gitApi = new GitApi();
 
   // The registry is rebuilt from settings whenever configuration changes; a
@@ -258,17 +264,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // resolver normalises all of them.
   context.subscriptions.push(
     vscode.commands.registerCommand(OPEN_DIFF_COMMAND, async (arg?: unknown) => {
+      const argDesc = describeArg(arg);
+      logChannel.appendLine(`openDiff invoked with arg: ${argDesc}`);
       const target = resolveDiffTarget(arg);
       if (target === undefined) {
+        logChannel.appendLine('openDiff: could not resolve a target.');
         void vscode.window.showInformationMessage(
           'GitLineDiff: no file to diff here. Open a file or pick one from the changes list.',
         );
         return;
       }
+      logChannel.appendLine(`openDiff: resolved target -> ${target.uri.toString()}`);
+
+      // Guard against opening a blank diff: if the resolved working-tree file
+      // doesn't exist on disk, there's nothing to diff (HEAD vs working would be
+      // empty/empty). Tell the user instead of overwriting their diff.
+      let exists = false;
+      try {
+        await vscode.workspace.fs.stat(target.uri);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      if (!exists) {
+        logChannel.appendLine(`openDiff: working file not found at ${target.uri.fsPath}`);
+        void vscode.window.showWarningMessage(
+          `GitLineDiff: couldn't resolve a working-tree file. arg=${argDesc}`,
+        );
+        return;
+      }
+
       try {
         await openPrettyDiff(target);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
+        logChannel.appendLine(`openDiff: error - ${detail}`);
         void vscode.window.showErrorMessage(`GitLineDiff: could not open diff. ${detail}`);
       }
     }),
@@ -301,6 +331,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 interface DiffTarget {
   readonly uri: vscode.Uri;
   readonly fileName: string;
+}
+
+/** Builds a human-readable description of a command argument for diagnostics. */
+function describeArg(arg: unknown): string {
+  if (arg === undefined) {
+    return 'undefined (will use active editor)';
+  }
+  if (arg instanceof vscode.Uri) {
+    return `Uri{ scheme=${arg.scheme}, fsPath=${arg.fsPath}, query=${arg.query} }`;
+  }
+  if (arg instanceof ChangedFileItem) {
+    return `ChangedFileItem{ ${arg.file.uri.toString()} }`;
+  }
+  const record = arg as { uri?: unknown; resourceUri?: unknown };
+  if (record.resourceUri instanceof vscode.Uri) {
+    return `obj.resourceUri{ scheme=${record.resourceUri.scheme}, ${record.resourceUri.toString()} }`;
+  }
+  if (record.uri instanceof vscode.Uri) {
+    return `obj.uri{ scheme=${record.uri.scheme}, ${record.uri.toString()} }`;
+  }
+  try {
+    return `${typeof arg}: ${JSON.stringify(arg)}`;
+  } catch {
+    return `${typeof arg} (unserialisable)`;
+  }
 }
 
 /** Returns the file name from a path, normalising separators. */
