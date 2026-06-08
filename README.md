@@ -78,6 +78,9 @@ A toolbar above the table gives you a **full git view**:
   single unified graph, or pick one branch to focus on just its commits.
 - **Show Remote Branches** — toggle whether remote-tracking branches appear in
   both the graph (as badges and history) and the Branches dropdown.
+- **Double-click a branch badge** — check out that branch (local branches
+  directly; remote-tracking branches check out an existing local branch or create
+  one tracking the remote).
 
 > **Works in Cursor too.** Cursor is a fork of VS Code and ships the same
 > built-in Git extension (`vscode.git`) and extension API, so GitLineDiff runs

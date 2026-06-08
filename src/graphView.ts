@@ -73,6 +73,13 @@ interface SetShowRemoteMessage {
   readonly value: boolean;
 }
 
+interface CheckoutRefMessage {
+  readonly type: 'checkoutRef';
+  readonly name: string;
+  readonly kind: RefLabel['kind'];
+  readonly current: boolean;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
@@ -100,6 +107,14 @@ function isSetBranchMessage(value: unknown): value is SetBranchMessage {
 function isSetShowRemoteMessage(value: unknown): value is SetShowRemoteMessage {
   const record = asRecord(value);
   return record?.type === 'setShowRemote' && typeof record.value === 'boolean';
+}
+
+function isCheckoutRefMessage(value: unknown): value is CheckoutRefMessage {
+  const record = asRecord(value);
+  return record?.type === 'checkoutRef'
+    && typeof record.name === 'string'
+    && (record.kind === 'head' || record.kind === 'remote' || record.kind === 'tag')
+    && typeof record.current === 'boolean';
 }
 
 /**
@@ -183,6 +198,8 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
         } else if (isSetShowRemoteMessage(message)) {
           this.showRemote = message.value;
           void this.render();
+        } else if (isCheckoutRefMessage(message)) {
+          void this.checkoutRef(message);
         }
       }),
       panel.onDidDispose(() => this.closePanel()),
@@ -294,6 +311,25 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       files,
     };
     void panel.webview.postMessage(payload);
+  }
+
+  /** Checks out a branch badge double-clicked in the graph. */
+  private async checkoutRef(message: CheckoutRefMessage): Promise<void> {
+    const label: RefLabel = {
+      name: message.name,
+      kind: message.kind,
+      current: message.current,
+    };
+    try {
+      await this.gitApi.checkoutRef(label);
+      if (!message.current) {
+        void vscode.window.showInformationMessage(`GitLineDiff: checked out ${message.name}.`);
+      }
+      // Repository state change triggers onDidChange -> re-render with updated HEAD badge.
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      void vscode.window.showErrorMessage(`GitLineDiff: could not checkout ${message.name}. ${detail}`);
+    }
   }
 
   /** Opens the pretty diff for the file at `index` within commit `hash`. */
@@ -476,6 +512,7 @@ function renderHtml(
     border: 1px solid transparent;
     vertical-align: middle;
   }
+  .badge.head, .badge.remote { cursor: pointer; }
   .badge.head { background: rgba(78,148,206,0.18); border-color: #4e94ce; color: var(--vscode-foreground); }
   .badge.remote { background: rgba(154,127,209,0.18); border-color: #9a7fd1; color: var(--vscode-foreground); }
   .badge.tag { background: rgba(82,180,85,0.18); border-color: #52b455; color: var(--vscode-foreground); }
@@ -690,6 +727,24 @@ function renderHtml(
         var badge = document.createElement('span');
         badge.className = 'badge ' + ref.kind + (ref.current ? ' current' : '');
         badge.textContent = (ref.current ? '\\u25CF ' : '') + ref.name;
+        if (ref.kind === 'head' || ref.kind === 'remote') {
+          (function (r) {
+            badge.title = r.current
+              ? 'Currently checked out'
+              : 'Double-click to checkout ' + r.name;
+            badge.addEventListener('click', function (e) { e.stopPropagation(); });
+            badge.addEventListener('dblclick', function (e) {
+              e.stopPropagation();
+              e.preventDefault();
+              vscode.postMessage({
+                type: 'checkoutRef',
+                name: r.name,
+                kind: r.kind,
+                current: !!r.current
+              });
+            });
+          })(ref);
+        }
         cell.appendChild(badge);
       }
       var subject = document.createElement('span');

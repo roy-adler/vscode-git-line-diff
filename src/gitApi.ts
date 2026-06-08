@@ -294,6 +294,48 @@ export class GitApi implements vscode.Disposable {
     return map;
   }
 
+  /**
+   * Checks out a branch shown on the graph. Local branches are checked out
+   * directly; remote-tracking branches check out an existing local branch with
+   * the same short name or create one tracking the remote.
+   */
+  public async checkoutRef(label: RefLabel): Promise<void> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      throw new Error('No git repository is open.');
+    }
+    if (label.kind === 'tag') {
+      throw new Error('Tags cannot be checked out from the graph.');
+    }
+    if (label.current) {
+      return;
+    }
+
+    if (label.kind === 'head') {
+      await repository.checkout(label.name);
+      return;
+    }
+
+    // Remote-tracking ref (e.g. `origin/main`): prefer an existing local branch
+    // with the same short name, otherwise create one from the remote.
+    const slash = label.name.indexOf('/');
+    const localName = slash !== -1 ? label.name.slice(slash + 1) : label.name;
+    if (localName === '' || localName === 'HEAD') {
+      await repository.checkout(label.name);
+      return;
+    }
+
+    const refs = await repository.getRefs({});
+    const hasLocal = refs.some(
+      (ref) => ref.type === RefType.Head && ref.name === localName,
+    );
+    if (hasLocal) {
+      await repository.checkout(localName);
+    } else {
+      await repository.createBranch(localName, true, label.name);
+    }
+  }
+
   /** Returns a commit's metadata, or `undefined` if unavailable. */
   public async getCommit(ref: string): Promise<Commit | undefined> {
     const repository = this.getPrimaryRepository();

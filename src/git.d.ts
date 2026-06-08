@@ -138,6 +138,16 @@ export interface Repository {
 
   /** Returns the repository's refs (branches, remote branches, tags). */
   getRefs(query?: RefQuery): Promise<Ref[]>;
+
+  /** Checks out an existing branch or revision (`git checkout <treeish>`). */
+  checkout(treeish: string): Promise<void>;
+
+  /**
+   * Creates a branch, optionally checking it out.
+   *
+   * @param ref Optional start point (e.g. a remote branch like `origin/main`).
+   */
+  createBranch(name: string, checkout: boolean, ref?: string): Promise<void>;
 }
 
 /** The Git extension API (version 1). */
