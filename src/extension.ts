@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { GitApi } from './gitApi';
+import { GitApi, type CommitDiffFile } from './gitApi';
 import { buildRegistry, FormatterRegistry } from './formatterRegistry';
 import { ChangedFileItem, GitLineDiffTreeProvider, OPEN_DIFF_COMMAND } from './treeView';
 import { readConfig, affectsConfig } from './config';
@@ -93,10 +93,19 @@ class PrettyDiffContentProvider
     }
 
     const sourceUri = vscode.Uri.file(src);
-    const raw =
-      ref === WORKING_REF
-        ? await this.gitApi.readWorkingTree(sourceUri)
-        : await this.gitApi.readRef(ref, sourceUri);
+    let raw: string;
+    if (ref === WORKING_REF) {
+      // The working-tree file may not exist (deleted file, or the source was a
+      // virtual diff side). Treat a missing file as empty rather than throwing,
+      // which would surface as an "unable to open" error in the diff editor.
+      try {
+        raw = await this.gitApi.readWorkingTree(sourceUri);
+      } catch {
+        raw = '';
+      }
+    } else {
+      raw = await this.gitApi.readRef(ref, sourceUri);
+    }
 
     // Transform through the registry before display. Unknown types or parse
     // failures fall back to the original content inside the formatter.
@@ -124,7 +133,13 @@ class PrettyDiffContentProvider
   }
 }
 
+/** Diagnostic output channel (View → Output → "GitLineDiff"). */
+let logChannel: vscode.OutputChannel;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  logChannel = vscode.window.createOutputChannel('GitLineDiff');
+  context.subscriptions.push(logChannel);
+
   const gitApi = new GitApi();
 
   // The registry is rebuilt from settings whenever configuration changes; a
@@ -201,11 +216,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
-  // Commit-graph panel (opens full-width in the editor area on demand).
+  // Opens a single file's pretty diff for a commit (parent revision vs commit).
+  const openCommitFile = async (
+    baseRef: string,
+    commitRef: string,
+    file: CommitDiffFile,
+  ): Promise<void> => {
+    const leftUri = PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, baseRef);
+    const rightUri = PrettyDiffContentProvider.buildUri(file.uri.fsPath, commitRef);
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      leftUri,
+      rightUri,
+      `GitLineDiff: ${basename(file.uri.fsPath)} @ ${commitRef.slice(0, 7)}`,
+    );
+  };
+
+  // Commit-graph panel (opens full-width in the editor area on demand). Clicking
+  // a commit expands an inline detail panel; clicking a file opens its pretty diff.
   const graphPanel = new GitLineDiffGraphPanel(
     gitApi,
-    (hash) => {
-      void openCommitDiff(hash);
+    (baseRef, commitRef, file) => {
+      void openCommitFile(baseRef, commitRef, file);
     },
     context.extensionUri,
   );
@@ -232,11 +264,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // resolver normalises all of them.
   context.subscriptions.push(
     vscode.commands.registerCommand(OPEN_DIFF_COMMAND, async (arg?: unknown) => {
+      const argDesc = describeArg(arg);
+      logChannel.appendLine(`openDiff invoked with arg: ${argDesc}`);
       const target = resolveDiffTarget(arg);
       if (target === undefined) {
+        logChannel.appendLine('openDiff: could not resolve a target.');
+        void vscode.window.showInformationMessage(
+          'GitLineDiff: no file to diff here. Open a file or pick one from the changes list.',
+        );
         return;
       }
-      await openPrettyDiff(target);
+      logChannel.appendLine(`openDiff: resolved target -> ${target.uri.toString()}`);
+
+      // Guard against opening a blank diff: if the resolved working-tree file
+      // doesn't exist on disk, there's nothing to diff (HEAD vs working would be
+      // empty/empty). Tell the user instead of overwriting their diff.
+      let exists = false;
+      try {
+        await vscode.workspace.fs.stat(target.uri);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      if (!exists) {
+        logChannel.appendLine(`openDiff: working file not found at ${target.uri.fsPath}`);
+        void vscode.window.showWarningMessage(
+          `GitLineDiff: couldn't resolve a working-tree file. arg=${argDesc}`,
+        );
+        return;
+      }
+
+      try {
+        await openPrettyDiff(target);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        logChannel.appendLine(`openDiff: error - ${detail}`);
+        void vscode.window.showErrorMessage(`GitLineDiff: could not open diff. ${detail}`);
+      }
     }),
   );
 
@@ -269,6 +333,31 @@ interface DiffTarget {
   readonly fileName: string;
 }
 
+/** Builds a human-readable description of a command argument for diagnostics. */
+function describeArg(arg: unknown): string {
+  if (arg === undefined) {
+    return 'undefined (will use active editor)';
+  }
+  if (arg instanceof vscode.Uri) {
+    return `Uri{ scheme=${arg.scheme}, fsPath=${arg.fsPath}, query=${arg.query} }`;
+  }
+  if (arg instanceof ChangedFileItem) {
+    return `ChangedFileItem{ ${arg.file.uri.toString()} }`;
+  }
+  const record = arg as { uri?: unknown; resourceUri?: unknown };
+  if (record.resourceUri instanceof vscode.Uri) {
+    return `obj.resourceUri{ scheme=${record.resourceUri.scheme}, ${record.resourceUri.toString()} }`;
+  }
+  if (record.uri instanceof vscode.Uri) {
+    return `obj.uri{ scheme=${record.uri.scheme}, ${record.uri.toString()} }`;
+  }
+  try {
+    return `${typeof arg}: ${JSON.stringify(arg)}`;
+  } catch {
+    return `${typeof arg} (unserialisable)`;
+  }
+}
+
 /** Returns the file name from a path, normalising separators. */
 function basename(filePath: string): string {
   return filePath.replace(/\\/g, '/').split('/').pop() ?? filePath;
@@ -283,31 +372,62 @@ function basename(filePath: string): string {
 function resolveDiffTarget(arg: unknown): DiffTarget | undefined {
   if (arg === undefined) {
     const active = vscode.window.activeTextEditor?.document.uri;
-    return active === undefined
-      ? undefined
-      : { uri: active, fileName: basename(active.fsPath) };
+    return active === undefined ? undefined : toFileTarget(active);
   }
   if (arg instanceof ChangedFileItem) {
     return { uri: arg.file.uri, fileName: arg.file.fileName };
   }
   if (arg instanceof vscode.Uri) {
-    return { uri: arg, fileName: basename(arg.fsPath) };
+    return toFileTarget(arg);
   }
   const record = arg as { uri?: unknown; resourceUri?: unknown; fileName?: unknown };
   if (record.resourceUri instanceof vscode.Uri) {
-    return {
-      uri: record.resourceUri,
-      fileName: basename(record.resourceUri.fsPath),
-    };
+    return toFileTarget(record.resourceUri);
   }
   if (record.uri instanceof vscode.Uri) {
-    return {
-      uri: record.uri,
-      fileName:
-        typeof record.fileName === 'string'
-          ? record.fileName
-          : basename(record.uri.fsPath),
-    };
+    const target = toFileTarget(record.uri);
+    if (target !== undefined && typeof record.fileName === 'string') {
+      return { uri: target.uri, fileName: record.fileName };
+    }
+    return target;
+  }
+  return undefined;
+}
+
+/**
+ * Normalises any editor/diff URI to a real on-disk `file:` target. Diff editors
+ * (built-in `git:` diffs, or our own `gitlinediff:` pretty diffs) expose virtual
+ * URIs; this maps them back to the underlying working-tree file so a fresh
+ * pretty diff can be opened. Returns `undefined` for resources with no real path.
+ */
+function toFileTarget(uri: vscode.Uri): DiffTarget | undefined {
+  if (uri.scheme === 'file') {
+    return { uri, fileName: basename(uri.fsPath) };
+  }
+  if (uri.scheme === SCHEME) {
+    // Our virtual scheme carries the real path in the `src` query param.
+    const src = new URLSearchParams(uri.query).get(QUERY_SRC);
+    if (src !== null && src !== '') {
+      const fileUri = vscode.Uri.file(src);
+      return { uri: fileUri, fileName: basename(fileUri.fsPath) };
+    }
+  }
+  if (uri.scheme === 'git') {
+    // The built-in Git scheme encodes the file path as JSON in the query.
+    try {
+      const parsed = JSON.parse(uri.query) as { path?: unknown };
+      if (typeof parsed.path === 'string' && parsed.path !== '') {
+        const fileUri = vscode.Uri.file(parsed.path);
+        return { uri: fileUri, fileName: basename(fileUri.fsPath) };
+      }
+    } catch {
+      // Fall through to the generic fsPath handling below.
+    }
+  }
+  // Last resort: use the URI's fsPath if it looks like an absolute path.
+  const fsPath = uri.fsPath;
+  if (fsPath !== '' && (fsPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(fsPath))) {
+    return { uri: vscode.Uri.file(fsPath), fileName: basename(fsPath) };
   }
   return undefined;
 }

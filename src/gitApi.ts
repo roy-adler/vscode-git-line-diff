@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { API, GitExtension, Repository, Change, Commit } from './git';
+import { RefType } from './git';
+import type { API, GitExtension, Repository, Change, Commit, Ref } from './git';
 
 /** Identifier of the built-in VS Code Git extension. */
 const GIT_EXTENSION_ID = 'vscode.git';
@@ -21,6 +22,24 @@ export interface CommitDiffFile {
   readonly uri: vscode.Uri;
   /** Path relative to the repository root, for display. */
   readonly relativePath: string;
+}
+
+/** A branch entry for the graph's branch-filter dropdown. */
+export interface BranchInfo {
+  /** Branch name (short for local, `remote/name` for remotes). */
+  readonly name: string;
+  /** True for a remote-tracking branch. */
+  readonly remote: boolean;
+  /** True for the currently checked-out branch (HEAD). */
+  readonly current: boolean;
+}
+
+/** A ref label attached to a commit, for rendering badges in the graph. */
+export interface RefLabel {
+  readonly name: string;
+  readonly kind: 'head' | 'remote' | 'tag';
+  /** True for the local branch currently checked out (HEAD). */
+  readonly current: boolean;
 }
 
 /** The resolved diff for a commit: its base ref plus the changed files. */
@@ -159,16 +178,132 @@ export class GitApi implements vscode.Disposable {
     return this.readRef(HEAD_REF, uri);
   }
 
-  /** Returns recent commits (most recent first), or `[]` if unavailable. */
-  public async getRecentCommits(maxEntries = 50): Promise<Commit[]> {
+  /**
+   * Returns recent commits (most recent first), or `[]` if unavailable.
+   *
+   * @param maxEntries Maximum number of commits to return.
+   * @param refNames   Revisions to log from (branch names). When omitted or
+   *                   empty, logs from `HEAD`. Pass multiple branch tips to get
+   *                   a unified "show all branches" history.
+   */
+  public async getRecentCommits(maxEntries = 50, refNames?: string[]): Promise<Commit[]> {
     const repository = this.getPrimaryRepository();
     if (repository === undefined) {
       return [];
     }
+    const refs = refNames !== undefined && refNames.length > 0 ? refNames : undefined;
     try {
-      return await repository.log({ maxEntries });
+      return await repository.log({ maxEntries, refNames: refs });
+    } catch {
+      // Some Git API builds reject unknown refNames; fall back to HEAD history.
+      try {
+        return await repository.log({ maxEntries });
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  /**
+   * Lists the repository's branches for the graph's branch filter.
+   *
+   * @param includeRemote When `true`, remote-tracking branches are included.
+   * @returns Branch entries (most relevant first), or `[]` if unavailable.
+   */
+  public async listBranches(includeRemote: boolean): Promise<BranchInfo[]> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return [];
+    }
+    const currentBranch = repository.state.HEAD?.name;
+    let refs: Ref[];
+    try {
+      refs = await repository.getRefs({});
     } catch {
       return [];
+    }
+
+    const branches: BranchInfo[] = [];
+    for (const ref of refs) {
+      if (ref.name === undefined) {
+        continue;
+      }
+      if (ref.type === RefType.Head) {
+        branches.push({ name: ref.name, remote: false, current: ref.name === currentBranch });
+      } else if (ref.type === RefType.RemoteHead && includeRemote) {
+        branches.push({ name: ref.name, remote: true, current: false });
+      }
+    }
+
+    // Current branch first, then local branches, then remotes; alphabetical within groups.
+    const rank = (b: BranchInfo): number => (b.current ? 0 : b.remote ? 2 : 1);
+    branches.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    return branches;
+  }
+
+  /**
+   * Builds a map from commit hash to the ref labels (branches, remote branches,
+   * tags) pointing at it, for rendering badges in the graph.
+   *
+   * @param includeRemote When `false`, remote-tracking branch labels are omitted.
+   */
+  public async getRefsByCommit(includeRemote = true): Promise<Map<string, RefLabel[]>> {
+    const map = new Map<string, RefLabel[]>();
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return map;
+    }
+
+    const currentBranch = repository.state.HEAD?.name;
+    let refs: Ref[];
+    try {
+      refs = await repository.getRefs({});
+    } catch {
+      return map;
+    }
+
+    for (const ref of refs) {
+      if (ref.commit === undefined || ref.name === undefined) {
+        continue;
+      }
+      if (ref.type === RefType.RemoteHead && !includeRemote) {
+        continue;
+      }
+      const kind: RefLabel['kind'] =
+        ref.type === RefType.Tag
+          ? 'tag'
+          : ref.type === RefType.RemoteHead
+            ? 'remote'
+            : 'head';
+      const label: RefLabel = {
+        name: ref.name,
+        kind,
+        current: kind === 'head' && ref.name === currentBranch,
+      };
+      const list = map.get(ref.commit) ?? [];
+      list.push(label);
+      map.set(ref.commit, list);
+    }
+
+    // Order labels: current branch, other branches, remotes, then tags.
+    const rank = (label: RefLabel): number =>
+      label.current ? 0 : label.kind === 'head' ? 1 : label.kind === 'remote' ? 2 : 3;
+    for (const list of map.values()) {
+      list.sort((a, b) => rank(a) - rank(b));
+    }
+    return map;
+  }
+
+  /** Returns a commit's metadata, or `undefined` if unavailable. */
+  public async getCommit(ref: string): Promise<Commit | undefined> {
+    const repository = this.getPrimaryRepository();
+    if (repository === undefined) {
+      return undefined;
+    }
+    try {
+      return await repository.getCommit(ref);
+    } catch {
+      return undefined;
     }
   }
 

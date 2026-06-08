@@ -80,6 +80,34 @@ export interface Commit {
 export interface LogOptions {
   /** Maximum number of commits to return. */
   readonly maxEntries?: number;
+  /**
+   * Revisions to log from (e.g. branch names). When omitted, logs from `HEAD`.
+   * Multiple refs produce a unified history across those tips.
+   */
+  readonly refNames?: string[];
+}
+
+/** The kind of a git ref. Mirrors the Git extension's `RefType`. */
+export const enum RefType {
+  Head,
+  RemoteHead,
+  Tag,
+}
+
+/** A git ref (local branch, remote-tracking branch, or tag). */
+export interface Ref {
+  readonly type: RefType;
+  readonly name?: string;
+  /** Full commit hash the ref points at. */
+  readonly commit?: string;
+  readonly remote?: string;
+}
+
+/** Query accepted by {@link Repository.getRefs}. */
+export interface RefQuery {
+  readonly contains?: string;
+  readonly count?: number;
+  readonly pattern?: string;
 }
 
 export interface Repository {
@@ -107,6 +135,9 @@ export interface Repository {
    * (path at `ref2`), accounting for renames.
    */
   diffBetween(ref1: string, ref2: string): Promise<Change[]>;
+
+  /** Returns the repository's refs (branches, remote branches, tags). */
+  getRefs(query?: RefQuery): Promise<Ref[]>;
 }
 
 /** The Git extension API (version 1). */
