@@ -188,6 +188,28 @@ To expand only specific keys, set:
 "gitlinediff.embeddedJson.keys": ["attributeValue"]
 ```
 
+### Axway `attributeValue` helper
+
+Policy Studio stores JSON inside `SetAttributeFilter` `attributeValue` fields as a
+single escaped string (double quotes escaped, line breaks as `\r\n`). The helper
+script `scripts/json_to_axway_attribute.py` converts a normal `.json` file into
+that format:
+
+```bash
+python scripts/json_to_axway_attribute.py input.json output.txt
+```
+
+The script validates the JSON, pretty-prints it with 2-space indentation, escapes
+it for Axway, wraps the result in outer double quotes, and writes a single line to
+the output file. Example output:
+
+```text
+"{\r\n  \"openapi\": \"3.0.0\",\r\n  \"info\": {\r\n    \"title\": \"Example\"\r\n  }\r\n}"
+```
+
+Requires Python 3.9+ (stdlib only). Clear errors are printed for missing files or
+invalid JSON.
+
 ## How it works
 
 1. **Git integration** (`src/gitApi.ts`)
