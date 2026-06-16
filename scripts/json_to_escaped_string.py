@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a JSON file into an escaped string for Axway Policy Studio SetAttributeFilter."""
+"""Convert a JSON file into a single-line escaped JSON string."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 
 
-def json_to_axway_attribute_value(data: object) -> str:
-    """Pretty-print JSON and escape it for use as an attributeValue string."""
+def json_to_escaped_string(data: object) -> str:
+    """Pretty-print JSON and escape it as a quoted single-line string."""
     pretty = json.dumps(data, indent=2, ensure_ascii=False)
 
     escaped = pretty.replace("\\", "\\\\")
@@ -51,8 +51,8 @@ def write_output(path: Path, content: str) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert a JSON file into an escaped string suitable for storing "
-            "inside an Axway Policy Studio SetAttributeFilter attributeValue."
+            "Convert a JSON file into a single-line escaped string "
+            "(pretty-printed, with \\\" and \\r\\n escapes, wrapped in quotes)."
         )
     )
     parser.add_argument("input", type=Path, help="Path to the input .json file")
@@ -65,13 +65,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         data = read_json_file(args.input)
-        result = json_to_axway_attribute_value(data)
+        result = json_to_escaped_string(data)
         write_output(args.output, result)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Wrote Axway attribute value to {args.output}")
+    print(f"Wrote escaped JSON string to {args.output}")
     return 0
 
 

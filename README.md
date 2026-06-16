@@ -188,19 +188,19 @@ To expand only specific keys, set:
 "gitlinediff.embeddedJson.keys": ["attributeValue"]
 ```
 
-### Axway `attributeValue` helper
+### Escaped JSON string helper
 
-Policy Studio stores JSON inside `SetAttributeFilter` `attributeValue` fields as a
-single escaped string (double quotes escaped, line breaks as `\r\n`). The helper
-script `scripts/json_to_axway_attribute.py` converts a normal `.json` file into
-that format:
+Some tracked config files store JSON as a single escaped line (double quotes
+escaped, line breaks as `\r\n`). The helper script
+`scripts/json_to_escaped_string.py` converts a normal `.json` file into that
+format:
 
 ```bash
-python scripts/json_to_axway_attribute.py input.json output.txt
+python scripts/json_to_escaped_string.py input.json output.txt
 ```
 
-The script validates the JSON, pretty-prints it with 2-space indentation, escapes
-it for Axway, wraps the result in outer double quotes, and writes a single line to
+The script validates the JSON, pretty-prints it with 2-space indentation, applies
+the escapes, wraps the result in outer double quotes, and writes a single line to
 the output file. Example output:
 
 ```text
