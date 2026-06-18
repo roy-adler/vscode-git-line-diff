@@ -69,6 +69,11 @@
         "title": "Refresh",
         "category": "GitLineDiff",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitlinediff.compareSelected",
+        "title": "Compare Selected with GitLineDiff",
+        "category": "GitLineDiff"
       }
     ],
     "configuration": {
@@ -165,8 +170,13 @@
       ],
       "explorer/context": [
         {
+          "command": "gitlinediff.compareSelected",
+          "when": "listDoubleSelection && !explorerResourceIsFolder",
+          "group": "3_compare@20"
+        },
+        {
           "command": "gitlinediff.openDiff",
-          "when": "!explorerResourceIsFolder",
+          "when": "!explorerResourceIsFolder && !listDoubleSelection",
           "group": "3_compare@99"
         }
       ],

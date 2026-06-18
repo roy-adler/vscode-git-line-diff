@@ -37,9 +37,21 @@ const QUERY_REF = 'ref';
 const QUERY_SRC = 'src';
 const QUERY_SIDE = 'side';
 const QUERY_PAIR_REF = 'pairRef';
+const QUERY_PAIR_SRC = 'pairSrc';
+
+/** Command that opens a pretty diff between two selected files. */
+const COMPARE_SELECTED_COMMAND = 'gitlinediff.compareSelected';
 
 /** Which side of a diff a virtual document represents. */
 type DiffSide = 'original' | 'modified';
+
+/** Context passed when building a virtual diff URI. */
+interface DiffUriContext {
+  readonly side: DiffSide;
+  readonly pairRef: string;
+  /** Other file path when comparing two different files on disk. */
+  readonly pairSrc?: string;
+}
 
 /** Metadata keyed by virtual URI string for tab/file decorations. */
 const sideMetadata = new Map<string, DiffSideMetadata>();
@@ -164,12 +176,17 @@ class PrettyDiffContentProvider
       crossFormatCompare: config.structuredData.canonicalizeToJson,
     };
 
+    const pairSrc = params.get(QUERY_PAIR_SRC);
+
     if (side !== null && pairRef !== null && config.structuredData.canonicalizeToJson) {
-      const pairRaw = await this.readRevision(pairRef, sourceUri);
+      const pairUri =
+        pairSrc !== null ? vscode.Uri.file(pairSrc) : sourceUri;
+      const pairRaw = await this.readRevision(pairRef, pairUri);
       const modifiedRaw = side === 'modified' ? raw : pairRaw;
+      const modifiedPath = side === 'modified' ? src : (pairSrc ?? src);
       const targetSerialization = detectSerializationFormat(
         modifiedRaw,
-        src,
+        modifiedPath,
         embeddedScan,
       );
       if (targetSerialization !== undefined) {
@@ -222,7 +239,7 @@ class PrettyDiffContentProvider
   public static buildUri(
     sourceFsPath: string,
     ref: string,
-    diff?: { readonly side: DiffSide; readonly pairRef: string },
+    diff?: DiffUriContext,
   ): vscode.Uri {
     const queryParams: Record<string, string> = {
       [QUERY_REF]: ref,
@@ -231,6 +248,9 @@ class PrettyDiffContentProvider
     if (diff !== undefined) {
       queryParams[QUERY_SIDE] = diff.side;
       queryParams[QUERY_PAIR_REF] = diff.pairRef;
+      if (diff.pairSrc !== undefined) {
+        queryParams[QUERY_PAIR_SRC] = diff.pairSrc;
+      }
     }
     const query = new URLSearchParams(queryParams).toString();
 
@@ -497,6 +517,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       graphPanel.refresh();
     }),
   );
+
+  // Command: pretty-compare exactly two selected files from the Explorer.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      COMPARE_SELECTED_COMMAND,
+      async (clicked?: vscode.Uri, allSelected?: vscode.Uri[]) => {
+        const pair = resolveCompareFilePair(clicked, allSelected);
+        if (pair === undefined) {
+          void vscode.window.showInformationMessage(
+            'GitLineDiff: select exactly two files in the Explorer to compare.',
+          );
+          return;
+        }
+
+        for (const uri of [pair.original, pair.modified]) {
+          try {
+            await vscode.workspace.fs.stat(uri);
+          } catch {
+            void vscode.window.showWarningMessage(
+              `GitLineDiff: file not found: ${basename(uri.fsPath)}`,
+            );
+            return;
+          }
+        }
+
+        try {
+          await openFileCompare(pair.original, pair.modified);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          logChannel.appendLine(`compareSelected: error - ${detail}`);
+          void vscode.window.showErrorMessage(
+            `GitLineDiff: could not compare files. ${detail}`,
+          );
+        }
+      },
+    ),
+  );
 }
 
 /** A normalised target for a working-tree pretty diff. */
@@ -651,6 +708,67 @@ async function openPrettyDiff(target: DiffTarget): Promise<void> {
     rightUri,
     `GitLineDiff: ${target.fileName}`,
   );
+}
+
+/**
+ * Opens a diff editor comparing two arbitrary files on disk. The first selected
+ * file is the original (left) side; the second is the modified (right) side.
+ */
+async function openFileCompare(
+  original: vscode.Uri,
+  modified: vscode.Uri,
+): Promise<void> {
+  const leftPath = original.fsPath;
+  const rightPath = modified.fsPath;
+  const leftUri = PrettyDiffContentProvider.buildUri(leftPath, WORKING_REF, {
+    side: 'original',
+    pairRef: WORKING_REF,
+    pairSrc: rightPath,
+  });
+  const rightUri = PrettyDiffContentProvider.buildUri(rightPath, WORKING_REF, {
+    side: 'modified',
+    pairRef: WORKING_REF,
+    pairSrc: leftPath,
+  });
+
+  await vscode.commands.executeCommand(
+    'vscode.diff',
+    leftUri,
+    rightUri,
+    `GitLineDiff: ${basename(leftPath)} ↔ ${basename(rightPath)}`,
+  );
+}
+
+/**
+ * Resolves two file URIs from an Explorer context-menu invocation. VS Code
+ * passes the right-clicked resource first and the full multi-selection second;
+ * the selection array is ordered by click/selection order.
+ */
+function resolveCompareFilePair(
+  clicked: vscode.Uri | undefined,
+  allSelected: vscode.Uri[] | undefined,
+): { readonly original: vscode.Uri; readonly modified: vscode.Uri } | undefined {
+  const selected =
+    allSelected !== undefined && allSelected.length === 2
+      ? allSelected
+      : clicked !== undefined
+        ? [clicked]
+        : [];
+
+  if (selected.length !== 2) {
+    return undefined;
+  }
+
+  const files = selected
+    .filter((uri) => uri.scheme === 'file')
+    .map((uri) => toFileTarget(uri))
+    .filter((target): target is DiffTarget => target !== undefined);
+
+  if (files.length !== 2) {
+    return undefined;
+  }
+
+  return { original: files[0].uri, modified: files[1].uri };
 }
 
 export function deactivate(): void {
