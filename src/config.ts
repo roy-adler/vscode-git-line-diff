@@ -9,6 +9,22 @@ export interface JsonConfig {
   readonly fileExtensions: readonly string[];
 }
 
+/** Settings controlling standalone YAML structured-data formatting. */
+export interface YamlConfig {
+  /** Extensions (no leading dot) treated as standalone YAML. */
+  readonly fileExtensions: readonly string[];
+}
+
+/** Settings shared by JSON and YAML structured-data formatters. */
+export interface StructuredDataConfig {
+  /**
+   * When true, both JSON and YAML files are rendered as canonical pretty JSON in
+   * the diff view so semantically equivalent documents compare cleanly across
+   * formats.
+   */
+  readonly canonicalizeToJson: boolean;
+}
+
 /** Settings controlling expansion of JSON embedded inside other files. */
 export interface EmbeddedJsonConfig {
   readonly enabled: boolean;
@@ -28,6 +44,8 @@ export interface EmbeddedJsonConfig {
 /** Fully-typed snapshot of the extension's configuration. */
 export interface GitLineDiffConfig {
   readonly json: JsonConfig;
+  readonly yaml: YamlConfig;
+  readonly structuredData: StructuredDataConfig;
   readonly embeddedJson: EmbeddedJsonConfig;
 }
 
@@ -51,6 +69,16 @@ export function readConfig(): GitLineDiffConfig {
   return {
     json: {
       fileExtensions: read<string[]>(config, 'json.fileExtensions', ['json']),
+    },
+    yaml: {
+      fileExtensions: read<string[]>(config, 'yaml.fileExtensions', ['yaml', 'yml']),
+    },
+    structuredData: {
+      canonicalizeToJson: read<boolean>(
+        config,
+        'structuredData.canonicalizeToJson',
+        true,
+      ),
     },
     embeddedJson: {
       enabled: read<boolean>(config, 'embeddedJson.enabled', true),

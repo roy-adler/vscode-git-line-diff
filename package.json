@@ -1,7 +1,7 @@
 {
   "name": "gitlinediff",
   "displayName": "GitLineDiff",
-  "description": "Diff single-line files (especially JSON) by pretty-printing both sides in memory before comparing.",
+  "description": "Diff single-line files (especially JSON and YAML) by pretty-printing both sides in memory before comparing.",
   "version": "0.1.6",
   "publisher": "RoyAdler",
   "license": "MIT",
@@ -25,6 +25,7 @@
     "git",
     "diff",
     "json",
+    "yaml",
     "pretty-print",
     "scm"
   ],
@@ -82,6 +83,22 @@
             "json"
           ],
           "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone JSON."
+        },
+        "gitlinediff.yaml.fileExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "yaml",
+            "yml"
+          ],
+          "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone YAML."
+        },
+        "gitlinediff.structuredData.canonicalizeToJson": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When enabled, both JSON and YAML files are rendered as canonical pretty JSON in the diff view so semantically equivalent documents compare cleanly even across formats. Each side still shows an origin badge (`JSON` or `YAML`)."
         },
         "gitlinediff.embeddedJson.enabled": {
           "type": "boolean",
@@ -188,5 +205,8 @@
     "@typescript-eslint/parser": "^7.0.0",
     "eslint": "^8.56.0",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }
