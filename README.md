@@ -19,6 +19,11 @@ documents.
 
 - **Custom Source Control view** (`GitLineDiff`) listing changed files.
 - **JSON pretty-printing** out of the box (`JSON.stringify(JSON.parse(x), null, 2)`).
+- **YAML pretty-printing** for standalone `.yaml`/`.yml` files, including
+  minified single-line YAML.
+- **Cross-format comparison** — JSON and YAML files with the same structured
+  content are rendered as canonical pretty JSON so diffs focus on data, not
+  syntax. Each side shows an **origin badge** (`JSON` or `YAML`) at the top.
 - **Embedded-JSON expansion** — pretty-prints single-line JSON stored *inside*
   another file, such as a YAML value `attributeValue: '{"a":1,...}'`.
 - **Configurable** — control file types, and which keys/patterns to expand,
@@ -141,6 +146,8 @@ any open diffs live.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `gitlinediff.json.fileExtensions` | `["json"]` | Extensions treated as standalone JSON and pretty-printed. |
+| `gitlinediff.yaml.fileExtensions` | `["yaml", "yml"]` | Extensions treated as standalone YAML and pretty-printed. |
+| `gitlinediff.structuredData.canonicalizeToJson` | `true` | Render both JSON and YAML as canonical pretty JSON for cross-format comparison. Origin badges still show the on-disk format. |
 | `gitlinediff.embeddedJson.enabled` | `true` | Expand single-line JSON strings embedded inside other files. |
 | `gitlinediff.embeddedJson.fileExtensions` | `["yaml", "yml"]` | Extensions scanned for embedded JSON values. |
 | `gitlinediff.embeddedJson.autoDetect` | `true` | When no `keys`/`keyPattern` are set, expand any value that parses as a JSON object/array. |
@@ -259,8 +266,31 @@ src/
 ├── treeView.ts           Source Control TreeDataProvider + formatter annotation
 ├── graphLayout.ts        Pure commit-graph lane/line layout algorithm
 ├── graphView.ts          Commit-graph webview panel (renders the layout, opens commit diffs)
-└── formatterRegistry.ts  Pluggable formatters (JSON + embedded-JSON), built from config
+└── formatterRegistry.ts  Pluggable formatters (JSON, YAML, embedded-JSON), built from config
 ```
+
+### Origin badges
+
+Structured JSON and YAML files get a one-line banner at the top of each diff
+side so you can see the on-disk format even when both sides are rendered as
+canonical JSON:
+
+```text
+// GitLineDiff · origin: JSON
+{
+  "openapi": "3.0.0"
+}
+```
+
+```text
+# GitLineDiff · origin: YAML
+{
+  "openapi": "3.0.0"
+}
+```
+
+Set `gitlinediff.structuredData.canonicalizeToJson` to `false` to pretty-print
+YAML in native YAML syntax instead (JSON files are always rendered as JSON).
 
 ### Ref-aware virtual documents
 
@@ -300,6 +330,19 @@ registry.register({
 ```
 
 ### YAML
+
+YAML support is built in. Standalone `.yaml`/`.yml` files are parsed as YAML,
+pretty-printed, and annotated with an origin badge. When
+`gitlinediff.structuredData.canonicalizeToJson` is enabled (default), YAML is
+rendered as canonical JSON so it compares cleanly with `.json` files carrying
+the same data. Embedded JSON strings and YAML block scalars inside YAML config
+files are expanded automatically (see [Configuration](#configuration)).
+
+To customise extensions or disable cross-format canonicalisation, adjust
+`gitlinediff.yaml.fileExtensions` and
+`gitlinediff.structuredData.canonicalizeToJson` in settings.
+
+For a custom formatter on other extensions, register one explicitly:
 
 ```ts
 import * as yaml from 'yaml';

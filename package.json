@@ -1,7 +1,7 @@
 {
   "name": "gitlinediff",
   "displayName": "GitLineDiff",
-  "description": "Diff single-line files (especially JSON) by pretty-printing both sides in memory before comparing.",
+  "description": "Diff single-line files (especially JSON and YAML) by pretty-printing both sides in memory before comparing.",
   "version": "0.1.6",
   "publisher": "RoyAdler",
   "license": "MIT",
@@ -25,6 +25,7 @@
     "git",
     "diff",
     "json",
+    "yaml",
     "pretty-print",
     "scm"
   ],
@@ -68,6 +69,11 @@
         "title": "Refresh",
         "category": "GitLineDiff",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitlinediff.compareSelected",
+        "title": "Compare Selected with GitLineDiff",
+        "category": "GitLineDiff"
       }
     ],
     "configuration": {
@@ -82,6 +88,22 @@
             "json"
           ],
           "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone JSON."
+        },
+        "gitlinediff.yaml.fileExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "yaml",
+            "yml"
+          ],
+          "markdownDescription": "File extensions (without the leading dot) that are pretty-printed as standalone YAML."
+        },
+        "gitlinediff.structuredData.canonicalizeToJson": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When enabled, both diff sides are rendered using the **modified (right) side's** serialization format (JSON or YAML) so cross-format embedded values compare cleanly. The original side shows a tab badge (`Y→J` or `J→Y`) when it was converted. Disable to pretty-print each side in its native on-disk format."
         },
         "gitlinediff.embeddedJson.enabled": {
           "type": "boolean",
@@ -148,8 +170,13 @@
       ],
       "explorer/context": [
         {
+          "command": "gitlinediff.compareSelected",
+          "when": "listDoubleSelection && !explorerResourceIsFolder",
+          "group": "3_compare@20"
+        },
+        {
           "command": "gitlinediff.openDiff",
-          "when": "!explorerResourceIsFolder",
+          "when": "!explorerResourceIsFolder && !listDoubleSelection",
           "group": "3_compare@99"
         }
       ],
@@ -188,5 +215,8 @@
     "@typescript-eslint/parser": "^7.0.0",
     "eslint": "^8.56.0",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }

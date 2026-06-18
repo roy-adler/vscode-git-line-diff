@@ -12,6 +12,18 @@
  * that the diff still works (just without prettification).
  */
 
+import {
+  expandLiteral,
+  formatStructuredDocument,
+  type SerializationFormat,
+  type StructuredFormatOptions,
+} from './structuredData';
+
+/** Per-request options for {@link FormatterRegistry.format}. */
+export interface FormatOptions {
+  readonly structured?: StructuredFormatOptions;
+}
+
 /**
  * Transforms raw file content into a pretty-printed representation.
  *
@@ -19,7 +31,7 @@
  * @returns Pretty-printed content, or the original content if it cannot be
  *          transformed.
  */
-export type FormatterFn = (content: string) => string;
+export type FormatterFn = (content: string, options?: FormatOptions) => string;
 
 export interface Formatter {
   /** Stable identifier, e.g. `"json"`. */
@@ -71,12 +83,12 @@ export class FormatterRegistry {
    * Applies the appropriate formatter to `content`. If no formatter matches,
    * the original content is returned unchanged.
    */
-  public format(filePath: string, content: string): string {
+  public format(filePath: string, content: string, options?: FormatOptions): string {
     const formatter = this.resolve(filePath);
     if (formatter === undefined) {
       return content;
     }
-    return formatter.format(content);
+    return formatter.format(content, options);
   }
 
   /** Returns the lower-cased extension (without the dot) or `undefined`. */
@@ -92,24 +104,76 @@ export class FormatterRegistry {
   }
 }
 
+/** Options for standalone JSON structured-data formatting. */
+export interface StructuredJsonOptions {
+  readonly extensions: readonly string[];
+  readonly crossFormatCompare: boolean;
+}
+
 /**
  * Creates a JSON formatter that re-serialises minified/single-line JSON with
  * two-space indentation. Falls back to the original content on parse failure so
  * that partial or non-standard JSON still diffs.
- *
- * @param extensions Extensions (no leading dot) this formatter handles.
  */
-export function createJsonFormatter(extensions: readonly string[]): Formatter {
+export function createJsonFormatter(options: StructuredJsonOptions): Formatter {
   return {
     id: 'json',
-    extensions,
-    format: (content: string): string => {
-      try {
-        return JSON.stringify(JSON.parse(content), null, 2);
-      } catch {
-        // Malformed JSON — show it verbatim rather than failing the diff.
-        return content;
+    extensions: options.extensions,
+    format: (content: string, formatOptions?: FormatOptions): string => {
+      const structured = formatOptions?.structured ?? {
+        crossFormatCompare: options.crossFormatCompare,
+      };
+      return (
+        formatStructuredDocument(content, 'json', structured) ?? content
+      );
+    },
+  };
+}
+
+/** Options for standalone YAML structured-data formatting. */
+export interface StructuredYamlOptions {
+  readonly extensions: readonly string[];
+  readonly crossFormatCompare: boolean;
+  /** When set, embedded structured values are expanded before pretty-printing. */
+  readonly embeddedJson: EmbeddedJsonOptions | undefined;
+}
+
+/**
+ * Creates a YAML formatter that pretty-prints YAML documents (including
+ * minified single-line YAML), optionally expands embedded JSON/YAML values, and
+ * can align serialization with the modified diff side for cross-format
+ * comparison.
+ */
+export function createYamlFormatter(options: StructuredYamlOptions): Formatter {
+  return {
+    id: 'yaml',
+    extensions: options.extensions,
+    format: (content: string, formatOptions?: FormatOptions): string => {
+      const structured = formatOptions?.structured ?? {
+        crossFormatCompare: options.crossFormatCompare,
+      };
+      const targetSerialization = structured.targetSerialization;
+
+      let working = content;
+      let didEmbed = false;
+      if (options.embeddedJson !== undefined) {
+        const expanded = expandEmbeddedStructuredValues(
+          content,
+          options.embeddedJson,
+          targetSerialization,
+        );
+        didEmbed = expanded !== content;
+        working = expanded;
       }
+
+      const formatted = formatStructuredDocument(working, 'yaml', structured);
+      if (formatted !== undefined) {
+        return formatted;
+      }
+      if (didEmbed) {
+        return working;
+      }
+      return content;
     },
   };
 }
@@ -134,6 +198,10 @@ export interface EmbeddedJsonOptions {
  * it. Captures: (1) indentation, (2) key, (3) quote char, (4) raw inner value.
  */
 const QUOTED_ENTRY = /^(\s*)(?:-\s+)?(["']?)([^:"']+)\2:\s*(['"])(.*)\4\s*$/;
+
+/** Matches the header line of a YAML block scalar (`|`, `|-`, `>`, …). */
+const BLOCK_SCALAR_HEADER =
+  /^(\s*)(?:-\s+)?(["']?)([^:"']+)\2:\s*([|>][+-]?)\s*$/;
 
 /**
  * Decides whether a key is eligible for embedded-JSON expansion based on the
@@ -181,6 +249,100 @@ function unescapeYamlScalar(quote: string, inner: string): string {
   }
 }
 
+function resolveExpansionTarget(
+  targetSerialization: SerializationFormat | undefined,
+): SerializationFormat {
+  return targetSerialization ?? 'yaml';
+}
+
+/**
+ * Expands embedded JSON strings and YAML block scalars inside a YAML file.
+ * Expanded values are rendered as indented block scalars so the surrounding
+ * YAML structure stays valid in the read-only diff view.
+ */
+function expandEmbeddedStructuredValues(
+  content: string,
+  options: EmbeddedJsonOptions,
+  targetSerialization: SerializationFormat | undefined,
+): string {
+  const expansionTarget = resolveExpansionTarget(targetSerialization);
+  const lines = content.split('\n');
+  const out: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    const blockMatch = BLOCK_SCALAR_HEADER.exec(line);
+    if (blockMatch !== null) {
+      const [, indent, , key] = blockMatch;
+      if (isKeyEligible(key, options)) {
+        const parentIndentLen = indent.length;
+        i++;
+        const blockLines: string[] = [];
+        while (i < lines.length) {
+          const bodyLine = lines[i];
+          if (bodyLine.trim() === '') {
+            blockLines.push(bodyLine);
+            i++;
+            continue;
+          }
+          const bodyIndent = bodyLine.match(/^(\s*)/)?.[1].length ?? 0;
+          if (bodyIndent <= parentIndentLen) {
+            break;
+          }
+          blockLines.push(bodyLine);
+          i++;
+        }
+
+        const nonEmpty = blockLines.filter((l) => l.trim() !== '');
+        if (nonEmpty.length > 0) {
+          const minIndent = Math.min(
+            ...nonEmpty.map((l) => l.match(/^(\s*)/)?.[1].length ?? 0),
+          );
+          const blockContent = nonEmpty.map((l) => l.slice(minIndent)).join('\n');
+          const expanded = expandLiteral(blockContent, expansionTarget);
+          if (expanded !== undefined) {
+            const blockIndent = `${indent}  `;
+            out.push(`${indent}${key}: |-`);
+            for (const expandedLine of expanded.split('\n')) {
+              out.push(`${blockIndent}${expandedLine}`);
+            }
+            continue;
+          }
+        }
+
+        out.push(line);
+        out.push(...blockLines);
+        continue;
+      }
+    }
+
+    const match = QUOTED_ENTRY.exec(line);
+    if (match !== null) {
+      const [, indent, , key, quote, rawValue] = match;
+      if (isKeyEligible(key, options)) {
+        const literal = unescapeYamlScalar(quote, rawValue);
+        const expanded = expandLiteral(literal, expansionTarget);
+        if (expanded !== undefined) {
+          const blockIndent = `${indent}  `;
+          out.push(`${indent}${key}: |-`);
+          for (const expandedLine of expanded.split('\n')) {
+            out.push(`${blockIndent}${expandedLine}`);
+          }
+          i++;
+          continue;
+        }
+      }
+    }
+
+    out.push(line);
+    i++;
+  }
+
+  return out.join('\n');
+}
+
 /**
  * Creates a formatter that expands single-line JSON strings embedded as values
  * inside text files (typically YAML). The transformation is surgical: only
@@ -191,69 +353,18 @@ export function createEmbeddedJsonFormatter(options: EmbeddedJsonOptions): Forma
   return {
     id: 'embedded-json',
     extensions: options.extensions,
-    format: (content: string): string => {
-      const lines = content.split('\n');
-      const out: string[] = [];
-
-      for (const line of lines) {
-        const match = QUOTED_ENTRY.exec(line);
-        if (match === null) {
-          out.push(line);
-          continue;
-        }
-
-        const [, indent, , key, quote, rawValue] = match;
-        if (!isKeyEligible(key, options)) {
-          out.push(line);
-          continue;
-        }
-
-        const literal = unescapeYamlScalar(quote, rawValue);
-        const expanded = tryExpandJson(literal);
-        if (expanded === undefined) {
-          out.push(line);
-          continue;
-        }
-
-        // Emit `key: |-` then the pretty JSON indented two spaces beyond the
-        // key. A block scalar keeps the expansion valid-looking YAML for the
-        // read-only diff view.
-        const blockIndent = `${indent}  `;
-        out.push(`${indent}${key}: |-`);
-        for (const jsonLine of expanded.split('\n')) {
-          out.push(`${blockIndent}${jsonLine}`);
-        }
-      }
-
-      return out.join('\n');
+    format: (content: string, formatOptions?: FormatOptions): string => {
+      const targetSerialization = formatOptions?.structured?.targetSerialization;
+      return expandEmbeddedStructuredValues(content, options, targetSerialization);
     },
   };
-}
-
-/**
- * Pretty-prints `value` if it is JSON describing an object or array. Returns
- * `undefined` for scalars or non-JSON so callers can leave the line untouched.
- */
-function tryExpandJson(value: string): string | undefined {
-  const trimmed = value.trim();
-  // Cheap pre-check: only objects/arrays are worth expanding.
-  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) {
-    return undefined;
-  }
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (typeof parsed !== 'object' || parsed === null) {
-      return undefined;
-    }
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return undefined;
-  }
 }
 
 /** Configuration shape consumed by {@link buildRegistry}. */
 export interface RegistryConfig {
   readonly json: { readonly fileExtensions: readonly string[] };
+  readonly yaml: { readonly fileExtensions: readonly string[] };
+  readonly structuredData: { readonly canonicalizeToJson: boolean };
   readonly embeddedJson: {
     readonly enabled: boolean;
     readonly fileExtensions: readonly string[];
@@ -264,40 +375,64 @@ export interface RegistryConfig {
 }
 
 /**
- * Builds a registry from configuration. The standalone JSON formatter is always
- * registered; the embedded-JSON formatter is registered only when enabled.
- *
- * To add a new format later, register it here (or call `registry.register`
- * from anywhere). For example:
- *
- * ```ts
- * registry.register({
- *   id: 'xml',
- *   extensions: ['xml', 'svg'],
- *   format: (content) => prettifyXml(content),
- * });
- * ```
+ * Builds a registry from configuration. JSON and YAML structured-data formatters
+ * are always registered; the standalone embedded-JSON formatter is registered
+ * only for extensions not already handled by the YAML formatter.
  */
 export function buildRegistry(config: RegistryConfig): FormatterRegistry {
   const registry = new FormatterRegistry();
-  registry.register(createJsonFormatter(config.json.fileExtensions));
+  const yamlExtensions = new Set(
+    config.yaml.fileExtensions.map((ext) => ext.toLowerCase()),
+  );
+  const crossFormatCompare = config.structuredData.canonicalizeToJson;
+
+  registry.register(
+    createJsonFormatter({
+      extensions: config.json.fileExtensions,
+      crossFormatCompare,
+    }),
+  );
+
+  registry.register(
+    createYamlFormatter({
+      extensions: config.yaml.fileExtensions,
+      crossFormatCompare,
+      embeddedJson: config.embeddedJson.enabled
+        ? {
+            extensions: config.yaml.fileExtensions,
+            autoDetect: config.embeddedJson.autoDetect,
+            keys: config.embeddedJson.keys,
+            keyPattern: config.embeddedJson.keyPattern,
+          }
+        : undefined,
+    }),
+  );
+
   if (config.embeddedJson.enabled) {
-    registry.register(
-      createEmbeddedJsonFormatter({
-        extensions: config.embeddedJson.fileExtensions,
-        autoDetect: config.embeddedJson.autoDetect,
-        keys: config.embeddedJson.keys,
-        keyPattern: config.embeddedJson.keyPattern,
-      }),
+    const standaloneEmbeddedExtensions = config.embeddedJson.fileExtensions.filter(
+      (ext) => !yamlExtensions.has(ext.toLowerCase()),
     );
+    if (standaloneEmbeddedExtensions.length > 0) {
+      registry.register(
+        createEmbeddedJsonFormatter({
+          extensions: standaloneEmbeddedExtensions,
+          autoDetect: config.embeddedJson.autoDetect,
+          keys: config.embeddedJson.keys,
+          keyPattern: config.embeddedJson.keyPattern,
+        }),
+      );
+    }
   }
+
   return registry;
 }
 
-/** Creates a registry using built-in defaults (JSON + embedded JSON in YAML). */
+/** Creates a registry using built-in defaults (JSON + YAML + embedded JSON). */
 export function createDefaultRegistry(): FormatterRegistry {
   return buildRegistry({
     json: { fileExtensions: ['json'] },
+    yaml: { fileExtensions: ['yaml', 'yml'] },
+    structuredData: { canonicalizeToJson: true },
     embeddedJson: {
       enabled: true,
       fileExtensions: ['yaml', 'yml'],
