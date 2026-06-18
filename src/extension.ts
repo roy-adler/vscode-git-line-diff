@@ -4,6 +4,13 @@ import { buildRegistry, FormatterRegistry } from './formatterRegistry';
 import { ChangedFileItem, GitLineDiffTreeProvider, OPEN_DIFF_COMMAND } from './treeView';
 import { readConfig, affectsConfig } from './config';
 import { GitLineDiffGraphPanel } from './graphView';
+import {
+  buildDiffSideMetadata,
+  detectSerializationFormat,
+  type DiffSideMetadata,
+  type EmbeddedScanOptions,
+  type StructuredFormatOptions,
+} from './structuredData';
 
 /** Command that opens a commit's multi-file pretty diff. */
 const OPEN_COMMIT_DIFF_COMMAND = 'gitlinediff.openCommitDiff';
@@ -28,6 +35,54 @@ const HEAD_REF = 'HEAD';
 /** Query keys used to encode state inside a virtual URI. */
 const QUERY_REF = 'ref';
 const QUERY_SRC = 'src';
+const QUERY_SIDE = 'side';
+const QUERY_PAIR_REF = 'pairRef';
+
+/** Which side of a diff a virtual document represents. */
+type DiffSide = 'original' | 'modified';
+
+/** Metadata keyed by virtual URI string for tab/file decorations. */
+const sideMetadata = new Map<string, DiffSideMetadata>();
+
+/** Signals VS Code to refresh file decorations for GitLineDiff virtual docs. */
+const decorationChangeEmitter = new vscode.EventEmitter<
+  vscode.Uri | vscode.Uri[] | undefined
+>();
+
+/**
+ * Renders origin and cross-format conversion badges on GitLineDiff diff tabs
+ * without injecting banners into the document text.
+ */
+class GitLineDiffFileDecorationProvider implements vscode.FileDecorationProvider {
+  public readonly onDidChangeFileDecorations = decorationChangeEmitter.event;
+
+  public provideFileDecoration(
+    uri: vscode.Uri,
+  ): vscode.ProviderResult<vscode.FileDecoration> {
+    if (uri.scheme !== SCHEME) {
+      return undefined;
+    }
+    const metadata = sideMetadata.get(uri.toString());
+    if (metadata === undefined) {
+      return undefined;
+    }
+
+    if (metadata.conversion !== undefined) {
+      const badge = metadata.conversion === 'yaml-to-json' ? 'Y→J' : 'J→Y';
+      const tooltip =
+        metadata.conversion === 'yaml-to-json'
+          ? 'GitLineDiff · converted YAML → JSON for comparison'
+          : 'GitLineDiff · converted JSON → YAML for comparison';
+      return new vscode.FileDecoration(badge, tooltip);
+    }
+
+    const badge = metadata.originFormat === 'json' ? 'JSON' : 'YAML';
+    return new vscode.FileDecoration(
+      badge,
+      `GitLineDiff · origin: ${metadata.originFormat.toUpperCase()}`,
+    );
+  }
+}
 
 /**
  * Provides pretty-printed, read-only virtual documents for the `gitlinediff`
@@ -71,10 +126,16 @@ class PrettyDiffContentProvider
   public refreshAll(): void {
     for (const file of this.gitApi.getWorkingTreeChanges()) {
       this.onDidChangeEmitter.fire(
-        PrettyDiffContentProvider.buildUri(file.uri.fsPath, HEAD_REF),
+        PrettyDiffContentProvider.buildUri(file.uri.fsPath, HEAD_REF, {
+          side: 'original',
+          pairRef: WORKING_REF,
+        }),
       );
       this.onDidChangeEmitter.fire(
-        PrettyDiffContentProvider.buildUri(file.uri.fsPath, WORKING_REF),
+        PrettyDiffContentProvider.buildUri(file.uri.fsPath, WORKING_REF, {
+          side: 'modified',
+          pairRef: HEAD_REF,
+        }),
       );
     }
   }
@@ -88,28 +149,68 @@ class PrettyDiffContentProvider
     const params = new URLSearchParams(uri.query);
     const ref = params.get(QUERY_REF) ?? WORKING_REF;
     const src = params.get(QUERY_SRC);
+    const side = params.get(QUERY_SIDE) as DiffSide | null;
+    const pairRef = params.get(QUERY_PAIR_REF);
     if (src === null) {
       return '';
     }
 
     const sourceUri = vscode.Uri.file(src);
-    let raw: string;
+    const raw = await this.readRevision(ref, sourceUri);
+    const config = readConfig();
+    const embeddedScan = toEmbeddedScanOptions(config);
+
+    let structured: StructuredFormatOptions = {
+      crossFormatCompare: config.structuredData.canonicalizeToJson,
+    };
+
+    if (side !== null && pairRef !== null && config.structuredData.canonicalizeToJson) {
+      const pairRaw = await this.readRevision(pairRef, sourceUri);
+      const modifiedRaw = side === 'modified' ? raw : pairRaw;
+      const targetSerialization = detectSerializationFormat(
+        modifiedRaw,
+        src,
+        embeddedScan,
+      );
+      if (targetSerialization !== undefined) {
+        structured = {
+          crossFormatCompare: true,
+          targetSerialization,
+        };
+      }
+
+      const metadata = buildDiffSideMetadata(
+        src,
+        raw,
+        side,
+        structured,
+        embeddedScan,
+      );
+      if (metadata === undefined) {
+        sideMetadata.delete(uri.toString());
+      } else {
+        sideMetadata.set(uri.toString(), metadata);
+      }
+      decorationChangeEmitter.fire(uri);
+    }
+
+    // Transform through the registry before display. Unknown types or parse
+    // failures fall back to the original content inside the formatter.
+    return this.getRegistry().format(src, raw, { structured });
+  }
+
+  private async readRevision(ref: string, sourceUri: vscode.Uri): Promise<string> {
     if (ref === WORKING_REF) {
       // The working-tree file may not exist (deleted file, or the source was a
       // virtual diff side). Treat a missing file as empty rather than throwing,
       // which would surface as an "unable to open" error in the diff editor.
       try {
-        raw = await this.gitApi.readWorkingTree(sourceUri);
+        return await this.gitApi.readWorkingTree(sourceUri);
       } catch {
-        raw = '';
+        return '';
       }
-    } else {
-      raw = await this.gitApi.readRef(ref, sourceUri);
     }
-
-    // Transform through the registry before display. Unknown types or parse
-    // failures fall back to the original content inside the formatter.
-    return this.getRegistry().format(src, raw);
+    return this.gitApi.readRef(ref, sourceUri);
   }
 
   /**
@@ -118,11 +219,20 @@ class PrettyDiffContentProvider
    * @param sourceFsPath Absolute path of the real file.
    * @param ref `WORKING_REF` or any git ref (e.g. `HEAD` / commit hash).
    */
-  public static buildUri(sourceFsPath: string, ref: string): vscode.Uri {
-    const query = new URLSearchParams({
+  public static buildUri(
+    sourceFsPath: string,
+    ref: string,
+    diff?: { readonly side: DiffSide; readonly pairRef: string },
+  ): vscode.Uri {
+    const queryParams: Record<string, string> = {
       [QUERY_REF]: ref,
       [QUERY_SRC]: sourceFsPath,
-    }).toString();
+    };
+    if (diff !== undefined) {
+      queryParams[QUERY_SIDE] = diff.side;
+      queryParams[QUERY_PAIR_REF] = diff.pairRef;
+    }
+    const query = new URLSearchParams(queryParams).toString();
 
     // Keep the original path so the editor title and language match the file.
     return vscode.Uri.from({
@@ -131,6 +241,19 @@ class PrettyDiffContentProvider
       query,
     });
   }
+}
+
+function toEmbeddedScanOptions(
+  config: ReturnType<typeof readConfig>,
+): EmbeddedScanOptions | undefined {
+  if (!config.embeddedJson.enabled) {
+    return undefined;
+  }
+  return {
+    autoDetect: config.embeddedJson.autoDetect,
+    keys: config.embeddedJson.keys,
+    keyPattern: config.embeddedJson.keyPattern,
+  };
 }
 
 /** Diagnostic output channel (View → Output → "GitLineDiff"). */
@@ -159,6 +282,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, contentProvider),
     contentProvider,
+    vscode.window.registerFileDecorationProvider(new GitLineDiffFileDecorationProvider()),
   );
 
   // Register the Source Control tree view.
@@ -192,8 +316,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
 
     const resources = diff.files.map((file) => ({
-      originalUri: PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef),
-      modifiedUri: PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef),
+      originalUri: PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef, {
+        side: 'original',
+        pairRef: diff.commitRef,
+      }),
+      modifiedUri: PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef, {
+        side: 'modified',
+        pairRef: diff.baseRef,
+      }),
     }));
     const title = `GitLineDiff: ${hash.slice(0, 7)}`;
 
@@ -208,8 +338,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       for (const file of diff.files) {
         await vscode.commands.executeCommand(
           'vscode.diff',
-          PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef),
-          PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef),
+          PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, diff.baseRef, {
+            side: 'original',
+            pairRef: diff.commitRef,
+          }),
+          PrettyDiffContentProvider.buildUri(file.uri.fsPath, diff.commitRef, {
+            side: 'modified',
+            pairRef: diff.baseRef,
+          }),
           `${basename(file.uri.fsPath)} @ ${hash.slice(0, 7)}`,
         );
       }
@@ -222,8 +358,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     commitRef: string,
     file: CommitDiffFile,
   ): Promise<void> => {
-    const leftUri = PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, baseRef);
-    const rightUri = PrettyDiffContentProvider.buildUri(file.uri.fsPath, commitRef);
+    const leftUri = PrettyDiffContentProvider.buildUri(file.originalUri.fsPath, baseRef, {
+      side: 'original',
+      pairRef: commitRef,
+    });
+    const rightUri = PrettyDiffContentProvider.buildUri(file.uri.fsPath, commitRef, {
+      side: 'modified',
+      pairRef: baseRef,
+    });
     await vscode.commands.executeCommand(
       'vscode.diff',
       leftUri,
@@ -494,8 +636,14 @@ async function pickCommit(gitApi: GitApi): Promise<string | undefined> {
 async function openPrettyDiff(target: DiffTarget): Promise<void> {
   const fsPath = target.uri.fsPath;
   // Left = committed baseline (HEAD), right = current working tree.
-  const leftUri = PrettyDiffContentProvider.buildUri(fsPath, HEAD_REF);
-  const rightUri = PrettyDiffContentProvider.buildUri(fsPath, WORKING_REF);
+  const leftUri = PrettyDiffContentProvider.buildUri(fsPath, HEAD_REF, {
+    side: 'original',
+    pairRef: WORKING_REF,
+  });
+  const rightUri = PrettyDiffContentProvider.buildUri(fsPath, WORKING_REF, {
+    side: 'modified',
+    pairRef: HEAD_REF,
+  });
 
   await vscode.commands.executeCommand(
     'vscode.diff',

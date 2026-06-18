@@ -98,7 +98,7 @@
         "gitlinediff.structuredData.canonicalizeToJson": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "When enabled, both JSON and YAML files are rendered as canonical pretty JSON in the diff view so semantically equivalent documents compare cleanly even across formats. Each side still shows an origin badge (`JSON` or `YAML`)."
+          "markdownDescription": "When enabled, both diff sides are rendered using the **modified (right) side's** serialization format (JSON or YAML) so cross-format embedded values compare cleanly. The original side shows a tab badge (`Y→J` or `J→Y`) when it was converted. Disable to pretty-print each side in its native on-disk format."
         },
         "gitlinediff.embeddedJson.enabled": {
           "type": "boolean",

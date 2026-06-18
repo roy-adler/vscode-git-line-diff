@@ -18,9 +18,9 @@ export interface YamlConfig {
 /** Settings shared by JSON and YAML structured-data formatters. */
 export interface StructuredDataConfig {
   /**
-   * When true, both JSON and YAML files are rendered as canonical pretty JSON in
-   * the diff view so semantically equivalent documents compare cleanly across
-   * formats.
+   * When true, structured values on both diff sides are rendered using the
+   * modified (right) side's serialization format so cross-format changes
+   * compare cleanly. A tab badge shows any conversion on the original side.
    */
   readonly canonicalizeToJson: boolean;
 }
