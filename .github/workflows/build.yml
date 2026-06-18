@@ -17,16 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --omit=optional
 
       - name: Lint
         run: npm run lint
@@ -35,10 +35,10 @@ jobs:
         run: npm run compile
 
       - name: Package extension (.vsix)
-        run: npx --yes @vscode/vsce package --out gitlinediff.vsix
+        run: npm run package -- --out gitlinediff.vsix
 
       - name: Upload .vsix artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: gitlinediff-vsix
           path: gitlinediff.vsix
@@ -54,18 +54,18 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --omit=optional
 
       - name: Configure git identity
         run: |
@@ -81,7 +81,7 @@ jobs:
         run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Package extension (.vsix)
-        run: npx --yes @vscode/vsce package --out gitlinediff-${{ steps.version.outputs.tag }}.vsix
+        run: npm run package -- --out "gitlinediff-${{ steps.version.outputs.tag }}.vsix"
 
       - name: Push version bump & tag
         run: git push --follow-tags origin HEAD:main
