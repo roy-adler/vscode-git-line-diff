@@ -2,7 +2,7 @@
   "name": "gitlinediff",
   "displayName": "GitLineDiff",
   "description": "Diff single-line files (especially JSON and YAML) by pretty-printing both sides in memory before comparing.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "RoyAdler",
   "license": "MIT",
   "icon": "media/images/icon.png",
