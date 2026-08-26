@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { RefType } from './git';
-import type { API, GitExtension, Repository, Change, Commit, Ref } from './git';
+import type { API, GitExtension, Repository, Change, Commit, Ref, LogOptions } from './git';
 
 /** Identifier of the built-in VS Code Git extension. */
 const GIT_EXTENSION_ID = 'vscode.git';
@@ -198,23 +198,42 @@ export class GitApi implements vscode.Disposable {
    * @param refNames   Revisions to log from (branch names). When omitted or
    *                   empty, logs from `HEAD`. Pass multiple branch tips to get
    *                   a unified "show all branches" history.
+   * @param skip       Commits to skip from the start of the log (`git --skip`).
    */
-  public async getRecentCommits(maxEntries = 50, refNames?: string[]): Promise<Commit[]> {
+  public async getRecentCommits(
+    maxEntries = 50,
+    refNames?: string[],
+    skip = 0,
+  ): Promise<Commit[]> {
     const repository = this.getPrimaryRepository();
     if (repository === undefined) {
       return [];
     }
     const refs = refNames !== undefined && refNames.length > 0 ? refNames : undefined;
+    const options = GitApi.logOptions(maxEntries, refs, skip);
     try {
-      return await repository.log({ maxEntries, refNames: refs });
+      return await repository.log(options);
     } catch {
       // Some Git API builds reject unknown refNames; fall back to HEAD history.
       try {
-        return await repository.log({ maxEntries });
+        return await repository.log(GitApi.logOptions(maxEntries, undefined, skip));
       } catch {
         return [];
       }
     }
+  }
+
+  /** Builds {@link LogOptions}, omitting empty optional fields. */
+  private static logOptions(
+    maxEntries: number,
+    refNames: string[] | undefined,
+    skip: number,
+  ): LogOptions {
+    return {
+      maxEntries,
+      ...(refNames !== undefined ? { refNames } : {}),
+      ...(skip > 0 ? { skip } : {}),
+    };
   }
 
   /**

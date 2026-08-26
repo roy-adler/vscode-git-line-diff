@@ -85,6 +85,11 @@ export interface LogOptions {
    * Multiple refs produce a unified history across those tips.
    */
   readonly refNames?: string[];
+  /**
+   * Number of commits to skip from the start of the log (git `--skip`).
+   * Ignored by some older Git-extension builds.
+   */
+  readonly skip?: number;
 }
 
 /** The kind of a git ref. Mirrors the Git extension's `RefType`. */

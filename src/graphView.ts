@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
+import { mergeCommitPage, nextLogQuery } from './commitPage';
+import type { Commit } from './git';
 import type { GitApi, RefLabel, CommitDiff, CommitDiffFile } from './gitApi';
 import { computeGraphLayout, type GraphLine } from './graphLayout';
+
+/** Commits fetched per log page. The first page paints immediately; older
+ *  history is loaded in the background and while the user is searching. */
+const COMMIT_PAGE_SIZE = 200;
 
 /** Webview panel view type for the commit graph. */
 export const GRAPH_VIEW_TYPE = 'gitLineDiffGraph';
@@ -80,6 +86,29 @@ interface CheckoutRefMessage {
   readonly current: boolean;
 }
 
+interface ReadyMessage {
+  readonly type: 'ready';
+  readonly search: string;
+}
+
+interface LoadMoreMessage {
+  readonly type: 'loadMore';
+}
+
+interface SetSearchMessage {
+  readonly type: 'setSearch';
+  readonly query: string;
+}
+
+/** Incremental graph payload posted after the initial HTML render. */
+interface GraphDataPayload {
+  readonly type: 'graphData';
+  readonly rows: GraphRowData[];
+  readonly columns: number;
+  readonly hasMore: boolean;
+  readonly loading: boolean;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
@@ -117,6 +146,21 @@ function isCheckoutRefMessage(value: unknown): value is CheckoutRefMessage {
     && typeof record.current === 'boolean';
 }
 
+function isReadyMessage(value: unknown): value is ReadyMessage {
+  const record = asRecord(value);
+  return record?.type === 'ready' && typeof record.search === 'string';
+}
+
+function isLoadMoreMessage(value: unknown): value is LoadMoreMessage {
+  const record = asRecord(value);
+  return record?.type === 'loadMore';
+}
+
+function isSetSearchMessage(value: unknown): value is SetSearchMessage {
+  const record = asRecord(value);
+  return record?.type === 'setSearch' && typeof record.query === 'string';
+}
+
 /**
  * Manages a single commit-graph webview **panel** in the editor area (full
  * width, like Git Graph). Opened on demand via {@link show}; clicking a commit
@@ -138,12 +182,29 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   /** Cache of resolved commit diffs, keyed by commit hash, for file opening. */
   private readonly diffCache = new Map<string, CommitDiff>();
 
+  /** Commits loaded so far (newest first), grown by paging. */
+  private commits: Commit[] = [];
+  private refsByCommit = new Map<string, RefLabel[]>();
+  private currentRefNames: string[] = [];
+  private currentControls: GraphControls = {
+    branches: [],
+    branchFilter: ALL_BRANCHES,
+    showRemote: true,
+  };
+  private hasMore = false;
+  private loadingMore = false;
+  private loadGeneration = 0;
+  /** False once we observe that the Git host ignores `skip`. */
+  private skipSupported = true;
+  /** True while the webview has a non-empty search query. */
+  private searchActive = false;
+
   /**
    * @param gitApi Source of commit history.
    * @param onOpenFile Invoked when the user clicks a changed file in a commit's
    *        detail panel; opens that file's pretty diff (parent vs commit).
    * @param extensionUri Base URI of the extension, used to resolve the tab icon.
-   * @param maxCommits Upper bound on commits to load.
+   * @param pageSize Commits fetched per log page.
    */
   constructor(
     private readonly gitApi: GitApi,
@@ -153,7 +214,7 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       file: CommitDiffFile,
     ) => void,
     private readonly extensionUri: vscode.Uri,
-    private readonly maxCommits = 200,
+    private readonly pageSize = COMMIT_PAGE_SIZE,
   ) {
     // Keep an open panel in sync with repository changes.
     this.disposables.push(
@@ -200,6 +261,16 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
           void this.render();
         } else if (isCheckoutRefMessage(message)) {
           void this.checkoutRef(message);
+        } else if (isReadyMessage(message)) {
+          this.searchActive = message.search.trim().length > 0;
+          this.tryStartLoading();
+        } else if (isLoadMoreMessage(message)) {
+          this.tryStartLoading();
+        } else if (isSetSearchMessage(message)) {
+          this.searchActive = message.query.trim().length > 0;
+          if (this.searchActive) {
+            this.tryStartLoading();
+          }
         }
       }),
       panel.onDidDispose(() => this.closePanel()),
@@ -221,9 +292,12 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
       return;
     }
 
-    // Repository state may have changed; drop cached diffs so detail panels
-    // re-fetch fresh data on next expand.
+    const generation = ++this.loadGeneration;
     this.diffCache.clear();
+    this.commits = [];
+    this.hasMore = false;
+    this.loadingMore = false;
+    this.searchActive = false;
 
     const branchInfos = await this.gitApi.listBranches(this.showRemote);
     const branchNames = branchInfos.map((b) => b.name);
@@ -236,35 +310,134 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
 
     // "Show all" logs from every visible branch tip; otherwise log the one
     // selected branch. An empty list falls back to HEAD inside the Git API.
-    const refNames =
+    this.currentRefNames =
       this.branchFilter === ALL_BRANCHES ? branchNames : [this.branchFilter];
-
-    const [commits, refsByCommit] = await Promise.all([
-      this.gitApi.getRecentCommits(this.maxCommits, refNames),
-      this.gitApi.getRefsByCommit(this.showRemote),
-    ]);
-    const controls: GraphControls = {
+    this.currentControls = {
       branches: branchNames,
       branchFilter: this.branchFilter,
       showRemote: this.showRemote,
     };
-    const layout = computeGraphLayout(commits);
+
+    const [page, refsByCommit] = await Promise.all([
+      this.gitApi.getRecentCommits(this.pageSize, this.currentRefNames),
+      this.gitApi.getRefsByCommit(this.showRemote),
+    ]);
+    if (generation !== this.loadGeneration || this.panel !== panel) {
+      return;
+    }
+
+    this.refsByCommit = refsByCommit;
+    this.commits = page;
+    this.hasMore = page.length >= this.pageSize;
+
+    const { rows, columns } = this.buildRowData();
+    panel.webview.html = renderHtml(
+      panel.webview,
+      rows,
+      columns,
+      this.currentControls,
+      { hasMore: this.hasMore, loading: this.hasMore },
+    );
+  }
+
+  /** Starts background paging if more history remains and a load isn't running. */
+  private tryStartLoading(): void {
+    if (this.panel === undefined || this.loadingMore || !this.hasMore) {
+      return;
+    }
+    void this.loadRemaining(this.loadGeneration);
+  }
+
+  /**
+   * Fetches subsequent log pages until history is exhausted or a newer render
+   * supersedes this load. Continues while the user is browsing or searching so
+   * older commits appear (and become searchable) gradually.
+   */
+  private async loadRemaining(generation: number): Promise<void> {
+    if (this.loadingMore || !this.hasMore) {
+      return;
+    }
+    this.loadingMore = true;
+    this.postGraphData();
+    try {
+      while (this.hasMore && generation === this.loadGeneration) {
+        await this.loadNextPage(generation);
+        if (!this.hasMore || generation !== this.loadGeneration) {
+          break;
+        }
+        await yieldToEventLoop();
+      }
+    } finally {
+      if (generation === this.loadGeneration) {
+        this.loadingMore = false;
+        this.postGraphData();
+      }
+    }
+  }
+
+  /** Fetches one page and merges it; retries without skip if the host ignores it. */
+  private async loadNextPage(generation: number): Promise<void> {
+    if (generation !== this.loadGeneration || this.panel === undefined) {
+      return;
+    }
+
+    let skipSupported = this.skipSupported;
+    for (;;) {
+      const query = nextLogQuery(this.commits.length, this.pageSize, skipSupported);
+      const page = await this.gitApi.getRecentCommits(
+        query.maxEntries,
+        this.currentRefNames,
+        query.skip,
+      );
+      if (generation !== this.loadGeneration) {
+        return;
+      }
+      const merged = mergeCommitPage(this.commits, page, this.pageSize, query.skip > 0);
+      if (merged.skipIgnored) {
+        this.skipSupported = false;
+        skipSupported = false;
+        continue;
+      }
+      this.commits = merged.commits.slice();
+      this.hasMore = merged.hasMore;
+      this.postGraphData();
+      return;
+    }
+  }
+
+  private buildRowData(): { rows: GraphRowData[]; columns: number } {
+    const layout = computeGraphLayout(this.commits);
     const rows: GraphRowData[] = layout.rows.map((row, index) => {
-      const commit = commits[index];
+      const commit = this.commits[index];
       return {
         hash: row.hash,
         short: row.hash.slice(0, 8),
         col: row.col,
         color: row.color,
         lines: row.linesAbove,
-        subject: firstLine(commit.message),
-        author: commit.authorName ?? '',
-        date: commit.authorDate ? formatDateTime(commit.authorDate) : '',
-        refs: refsByCommit.get(row.hash) ?? [],
+        subject: commit !== undefined ? firstLine(commit.message) : '',
+        author: commit?.authorName ?? '',
+        date: commit?.authorDate ? formatDateTime(commit.authorDate) : '',
+        refs: this.refsByCommit.get(row.hash) ?? [],
       };
     });
+    return { rows, columns: layout.columns };
+  }
 
-    panel.webview.html = renderHtml(panel.webview, rows, layout.columns, controls);
+  private postGraphData(): void {
+    const panel = this.panel;
+    if (panel === undefined) {
+      return;
+    }
+    const { rows, columns } = this.buildRowData();
+    const payload: GraphDataPayload = {
+      type: 'graphData',
+      rows,
+      columns,
+      hasMore: this.hasMore,
+      loading: this.loadingMore && this.hasMore,
+    };
+    void panel.webview.postMessage(payload);
   }
 
   /** Resolves a commit's diff once, caching it for later file opening. */
@@ -342,6 +515,7 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   }
 
   private closePanel(): void {
+    this.loadGeneration++;
     for (const disposable of this.panelDisposables) {
       disposable.dispose();
     }
@@ -378,6 +552,13 @@ function formatDateTime(date: Date): string {
   );
 }
 
+/** Yields so the webview can paint between log pages. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 /** Generates a random nonce for the Content Security Policy. */
 function makeNonce(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -394,9 +575,16 @@ function renderHtml(
   rows: GraphRowData[],
   columns: number,
   controls: GraphControls,
+  paging: { hasMore: boolean; loading: boolean },
 ): string {
   const nonce = makeNonce();
-  const data = JSON.stringify({ rows, columns, controls });
+  const data = JSON.stringify({
+    rows,
+    columns,
+    controls,
+    hasMore: paging.hasMore,
+    loading: paging.loading,
+  });
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -623,11 +811,12 @@ function renderHtml(
     text-overflow: ellipsis;
     overflow: hidden;
   }
-  #empty, #noSearchResults {
+  #empty, #noSearchResults, #loadStatus {
     display: none;
     padding: 16px 12px;
     color: var(--vscode-descriptionForeground);
   }
+  #loadStatus { padding-top: 8px; }
 </style>
 </head>
 <body>
@@ -649,6 +838,7 @@ function renderHtml(
 </div>
 <div id="empty">No commits to display for the current filter.</div>
 <div id="noSearchResults">No commits match your search.</div>
+<div id="loadStatus"></div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const DATA = ${data};
@@ -657,8 +847,8 @@ function renderHtml(
   const colX = function (c) { return PAD + c * COL_W; };
   const rowY = function (i) { return i * ROW_H + ROW_H / 2; };
 
-  const graphNatural = PAD + Math.max(1, DATA.columns) * COL_W + PAD;
-  const totalHeight = DATA.rows.length * ROW_H;
+  var graphNatural = PAD + Math.max(1, DATA.columns) * COL_W + PAD;
+  var totalHeight = DATA.rows.length * ROW_H;
 
   // Column definitions and their default widths.
   var COLS = {
@@ -987,6 +1177,7 @@ function renderHtml(
   window.addEventListener('message', function (e) {
     var msg = e.data;
     if (msg && msg.type === 'commitDetail') { renderDetail(msg); }
+    if (msg && msg.type === 'graphData') { applyGraphData(msg); }
   });
 
   // ---- Search ----
@@ -1009,6 +1200,7 @@ function renderHtml(
     for (var i = 0; i < DATA.rows.length; i++) {
       var match = !active || rowMatches(DATA.rows[i], q);
       if (match) { visible++; }
+      if (!rowEls[i]) { continue; }
       rowEls[i].classList.toggle('filtered-out', !match);
       if (!match) {
         detailEls[i].classList.add('filtered-out');
@@ -1018,9 +1210,12 @@ function renderHtml(
         detailEls[i].classList.remove('filtered-out');
       }
     }
+    var stillLoading = !!(DATA.loading || DATA.hasMore);
     var countEl = document.getElementById('searchCount');
     if (countEl) {
-      countEl.textContent = active ? (visible + ' / ' + DATA.rows.length) : '';
+      countEl.textContent = active
+        ? (visible + ' / ' + DATA.rows.length + (stillLoading ? ' (loading older\u2026)' : ''))
+        : '';
     }
     var clearBtn = document.getElementById('searchClear');
     if (clearBtn) {
@@ -1030,15 +1225,21 @@ function renderHtml(
     var body = document.getElementById('body');
     var hdr = document.getElementById('header');
     if (active && visible === 0) {
-      if (noResults) { noResults.style.display = 'block'; }
+      if (noResults) {
+        noResults.style.display = 'block';
+        noResults.textContent = stillLoading
+          ? 'No matches yet \u2014 loading older commits\u2026'
+          : 'No commits match your search.';
+      }
       if (body) { body.style.display = 'none'; }
       if (hdr) { hdr.style.display = 'none'; }
     } else {
       if (noResults) { noResults.style.display = 'none'; }
-      if (body) { body.style.display = ''; }
-      if (hdr) { hdr.style.display = ''; }
+      if (body) { body.style.display = DATA.rows.length ? '' : 'none'; }
+      if (hdr) { hdr.style.display = DATA.rows.length ? '' : 'none'; }
     }
     drawGraph();
+    updateLoadStatus();
   }
 
   function rebuild() {
@@ -1079,6 +1280,7 @@ function renderHtml(
       searchQuery = searchInput.value;
       applySearch();
       saveState();
+      vscode.postMessage({ type: 'setSearch', query: searchQuery });
     });
     document.getElementById('searchClear').addEventListener('click', function () {
       searchQuery = '';
@@ -1086,6 +1288,7 @@ function renderHtml(
       applySearch();
       saveState();
       searchInput.focus();
+      vscode.postMessage({ type: 'setSearch', query: '' });
     });
     document.addEventListener('keydown', function (e) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
@@ -1098,6 +1301,7 @@ function renderHtml(
         searchInput.value = '';
         applySearch();
         saveState();
+        vscode.postMessage({ type: 'setSearch', query: '' });
       }
     });
   })();
@@ -1136,6 +1340,92 @@ function renderHtml(
   } else {
     rebuild();
   }
+  updateLoadStatus();
+  vscode.postMessage({ type: 'ready', search: searchQuery });
+
+  function syncMetrics() {
+    graphNatural = PAD + Math.max(1, DATA.columns) * COL_W + PAD;
+    totalHeight = DATA.rows.length * ROW_H;
+    COLS.graph.def = Math.min(420, Math.max(80, graphNatural));
+    if (widths.graph < COLS.graph.def) { widths.graph = COLS.graph.def; }
+  }
+  function updateLoadStatus() {
+    var el = document.getElementById('loadStatus');
+    if (!el) { return; }
+    var searching = searchQuery.trim().length > 0;
+    if (DATA.loading || DATA.hasMore) {
+      el.style.display = 'block';
+      el.textContent = searching
+        ? 'Loading older commits to search\u2026'
+        : 'Loading older commits\u2026';
+    } else {
+      el.style.display = 'none';
+      el.textContent = '';
+    }
+  }
+  function appendRows(newRows, startIndex) {
+    newRows.forEach(function (row, j) {
+      var i = startIndex + j;
+      hashToIndex[row.hash] = i;
+      var rowEl = document.createElement('div');
+      rowEl.className = 'row';
+      rowEl.title = row.hash;
+      order.forEach(function (id) {
+        var cell = document.createElement('div');
+        cell.className = 'cell ' + id;
+        fillCell(cell, id, row);
+        rowEl.appendChild(cell);
+      });
+      rowEl.addEventListener('click', function () { toggleDetail(i, row); });
+      rowsEl.appendChild(rowEl);
+      rowEls.push(rowEl);
+      var detail = document.createElement('div');
+      detail.className = 'detail';
+      rowsEl.appendChild(detail);
+      detailEls.push(detail);
+    });
+    if (DATA.rows.length > 0) {
+      document.getElementById('empty').style.display = 'none';
+      document.getElementById('header').style.display = '';
+      document.getElementById('body').style.display = '';
+    }
+  }
+  function applyGraphData(msg) {
+    var prevLen = DATA.rows.length;
+    var canAppend = prevLen > 0 && msg.rows.length >= prevLen;
+    for (var i = 0; i < prevLen && canAppend; i++) {
+      if (DATA.rows[i].hash !== msg.rows[i].hash) { canAppend = false; }
+    }
+    DATA.hasMore = !!msg.hasMore;
+    DATA.loading = !!msg.loading;
+    DATA.columns = msg.columns;
+    var scrollY = window.scrollY;
+    if (canAppend && msg.rows.length > prevLen) {
+      var added = msg.rows.slice(prevLen);
+      DATA.rows = msg.rows;
+      syncMetrics();
+      appendRows(added, prevLen);
+    } else if (!canAppend) {
+      DATA.rows = msg.rows;
+      syncMetrics();
+      rebuild();
+    } else {
+      DATA.rows = msg.rows;
+      syncMetrics();
+    }
+    applySearch();
+    applyLayout();
+    window.scrollTo(0, scrollY);
+    maybeRequestMore();
+  }
+  function maybeRequestMore() {
+    if (!DATA.hasMore) { return; }
+    var remaining = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+    if (remaining < 600) {
+      vscode.postMessage({ type: 'loadMore' });
+    }
+  }
+  window.addEventListener('scroll', maybeRequestMore);
 </script>
 </body>
 </html>`;

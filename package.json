@@ -207,6 +207,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
+    "test": "tsc -p ./ && node --test out/commitPage.test.js",
     "package": "vsce package"
   },
   "overrides": {

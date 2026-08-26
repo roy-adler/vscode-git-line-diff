@@ -3,6 +3,7 @@
 src/**
 **/*.ts
 **/*.map
+**/*.test.js
 .gitignore
 .eslintrc.json
 tsconfig.json
