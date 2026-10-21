@@ -1,4 +1,4 @@
-name: Build & Release
+name: Build & Publish
 
 on:
   push:
@@ -7,14 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Prevent overlapping releases from racing on the version bump / tag push.
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -44,58 +41,16 @@ jobs:
           path: gitlinediff.vsix
           if-no-files-found: error
 
-  release:
-    # Auto-bump, tag, publish to the VS Code Marketplace, and attach the .vsix
-    # to a GitHub Release on pushes to main.
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci --omit=optional
-
-      - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Bump patch version & create tag
-        run: |
-          npm version patch -m "ci: release v%s [skip ci]"
-
-      - name: Read new version
-        id: version
-        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Package extension (.vsix)
-        run: npm run package -- --out "gitlinediff-${{ steps.version.outputs.tag }}.vsix"
-
+      # Patch-bumps package.json, publishes to the Marketplace, then syncs the
+      # version back to main. Skips when the push is the version sync itself.
       - name: Publish to VS Code Marketplace
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx vsce publish --packagePath "gitlinediff-${{ steps.version.outputs.tag }}.vsix"
-
-      - name: Push version bump & tag
-        run: git push --follow-tags origin HEAD:main
-
-      - name: Create GitHub Release with .vsix
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            "gitlinediff-${{ steps.version.outputs.tag }}.vsix" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --generate-notes
+          npx vsce publish patch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: bump extension version"
+          git push
