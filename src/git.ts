@@ -9,10 +9,10 @@
  * Keeping our own declaration lets `gitApi.ts` stay fully typed with no `any`.
  */
 
-import { Uri, Event, Disposable } from 'vscode';
+import type { Uri, Event } from 'vscode';
 
 /** Status of a single change in a repository. */
-export const enum Status {
+export enum Status {
   INDEX_MODIFIED,
   INDEX_ADDED,
   INDEX_DELETED,
@@ -93,7 +93,7 @@ export interface LogOptions {
 }
 
 /** The kind of a git ref. Mirrors the Git extension's `RefType`. */
-export const enum RefType {
+export enum RefType {
   Head,
   RemoteHead,
   Tag,
@@ -171,5 +171,3 @@ export interface GitExtension {
    */
   getAPI(version: 1): API;
 }
-
-export { Uri, Event, Disposable };

@@ -13,7 +13,7 @@
     {
       "type": "npm",
       "script": "watch",
-      "problemMatcher": "$tsc-watch",
+      "problemMatcher": [],
       "label": "npm: watch",
       "isBackground": true,
       "presentation": {
