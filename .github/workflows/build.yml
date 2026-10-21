@@ -48,9 +48,10 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          npx vsce publish patch
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version patch --no-git-tag-version
+          npx vsce publish
           git add package.json package-lock.json
           git commit -m "chore: bump extension version"
           git push
