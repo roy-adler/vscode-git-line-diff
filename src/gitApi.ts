@@ -1,6 +1,11 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import * as vscode from 'vscode';
+import { commitNameStatusArgs, parseNameStatusZ } from './diffNames';
 import { RefType } from './git';
 import type { API, GitExtension, Repository, Change, Commit, Ref, LogOptions } from './git';
+
+const execFileAsync = promisify(execFile);
 
 /** Identifier of the built-in VS Code Git extension. */
 const GIT_EXTENSION_ID = 'vscode.git';
@@ -384,8 +389,20 @@ export class GitApi implements vscode.Disposable {
   /**
    * Resolves the changed files of a commit relative to its first parent (or the
    * empty tree for the root commit).
+   *
+   * `knownParents`, when passed, skips a second `getCommit` round-trip. An
+   * empty array means the commit is a root.
+   *
+   * The file list is read with `git diff --name-status` and rename detection
+   * turned off. The built-in Git API's `diffBetween` runs `git diff` with
+   * renames enabled and shares that extension's command queue with history
+   * paging, which on a large repository can sit unfinished for the whole time
+   * the graph is loading older commits.
    */
-  public async getCommitDiff(commitRef: string): Promise<CommitDiff> {
+  public async getCommitDiff(
+    commitRef: string,
+    knownParents?: readonly string[],
+  ): Promise<CommitDiff> {
     const repository = this.getPrimaryRepository();
     const empty: CommitDiff = { baseRef: '', commitRef, files: [] };
     if (repository === undefined) {
@@ -393,11 +410,28 @@ export class GitApi implements vscode.Disposable {
     }
 
     try {
-      const commit = await repository.getCommit(commitRef);
-      const baseRef = commit.parents[0] ?? EMPTY_TREE_REF;
-      const rootPath = repository.rootUri.fsPath;
-      const changes = await repository.diffBetween(baseRef, commitRef);
+      const parents = knownParents ?? (await repository.getCommit(commitRef)).parents;
+      const baseRef = parents[0] ?? EMPTY_TREE_REF;
+      const root = repository.rootUri;
+      const gitPath = this.api?.git?.path;
 
+      if (gitPath !== undefined && gitPath.length > 0) {
+        try {
+          const files = await GitApi.diffNameStatus(
+            gitPath,
+            root,
+            commitRef,
+            parents[0],
+          );
+          return { baseRef, commitRef, files };
+        } catch {
+          // Fall through to the Git extension when this git binary rejects the
+          // command. That path is slower, but it still returns a file list.
+        }
+      }
+
+      const changes = await repository.diffBetween(baseRef, commitRef);
+      const rootPath = root.fsPath;
       const files = changes.map((change: Change): CommitDiffFile => ({
         originalUri: change.originalUri,
         uri: change.uri,
@@ -407,6 +441,62 @@ export class GitApi implements vscode.Disposable {
     } catch {
       return empty;
     }
+  }
+
+  /**
+   * Lists files changed by `commitRef` relative to `parentRef`.
+   *
+   * `parentRef` is omitted for the root commit, which is diffed against the
+   * empty tree via `git diff-tree --root` so SHA-256 repositories work.
+   */
+  private static async diffNameStatus(
+    gitPath: string,
+    root: vscode.Uri,
+    commitRef: string,
+    parentRef: string | undefined,
+  ): Promise<CommitDiffFile[]> {
+    const args = commitNameStatusArgs(root.fsPath, commitRef, parentRef);
+    const text = await GitApi.runGit(gitPath, args, root.fsPath);
+
+    return parseNameStatusZ(text).map((entry) => ({
+      originalUri: GitApi.fileUri(root, entry.originalPath),
+      uri: GitApi.fileUri(root, entry.path),
+      relativePath: entry.path,
+    }));
+  }
+
+  /**
+   * Runs git and returns stdout. Exit code 1 is treated as success because
+   * some git builds and wrappers use it to mean "the diff was not empty".
+   */
+  private static async runGit(gitPath: string, args: string[], cwd: string): Promise<string> {
+    const options = {
+      cwd,
+      encoding: 'utf8' as const,
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GCM_INTERACTIVE: 'never',
+      },
+    };
+    try {
+      const { stdout } = await execFileAsync(gitPath, args, options);
+      return typeof stdout === 'string' ? stdout : String(stdout);
+    } catch (error) {
+      const failed = error as { code?: number | string; stdout?: string | Buffer };
+      if (failed.code === 1 && failed.stdout !== undefined) {
+        return typeof failed.stdout === 'string' ? failed.stdout : failed.stdout.toString('utf8');
+      }
+      throw error;
+    }
+  }
+
+  /** Joins a repo-relative git path (forward slashes) onto the repository root. */
+  private static fileUri(root: vscode.Uri, relativePath: string): vscode.Uri {
+    const parts = relativePath.replace(/\\/g, '/').split('/').filter((part) => part.length > 0);
+    return vscode.Uri.joinPath(root, ...parts);
   }
 
   /** Subscribes to a repository's state changes and re-emits them. */

@@ -155,8 +155,16 @@ export interface Repository {
   createBranch(name: string, checkout: boolean, ref?: string): Promise<void>;
 }
 
+/** Git executable resolved by the built-in Git extension. */
+export interface Git {
+  /** Absolute path to the `git` binary the host uses. */
+  readonly path: string;
+}
+
 /** The Git extension API (version 1). */
 export interface API {
+  /** Present on Git API 1. Hosts without it fall back to {@link Repository.diffBetween}. */
+  readonly git?: Git;
   readonly repositories: Repository[];
   readonly onDidOpenRepository: Event<Repository>;
   readonly onDidCloseRepository: Event<Repository>;

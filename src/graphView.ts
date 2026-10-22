@@ -194,6 +194,10 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   private hasMore = false;
   private loadingMore = false;
   private loadGeneration = 0;
+  /** Commit-detail fetches in flight. History paging waits so opening a commit
+   *  is not stuck behind `git log` on a large repository. */
+  private detailRequests = 0;
+  private detailReleased: Array<() => void> = [];
   /** False once we observe that the Git host ignores `skip`. */
   private skipSupported = true;
   /** True while the webview has a non-empty search query. */
@@ -361,6 +365,10 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
     this.postGraphData();
     try {
       while (this.hasMore && generation === this.loadGeneration) {
+        if (this.detailRequests > 0) {
+          await this.waitForCommitDetails();
+          continue;
+        }
         await this.loadNextPage(generation);
         if (!this.hasMore || generation !== this.loadGeneration) {
           break;
@@ -441,14 +449,35 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
   }
 
   /** Resolves a commit's diff once, caching it for later file opening. */
-  private async resolveDiff(hash: string): Promise<CommitDiff> {
+  private async resolveDiff(hash: string, parents?: readonly string[]): Promise<CommitDiff> {
     const cached = this.diffCache.get(hash);
     if (cached !== undefined) {
       return cached;
     }
-    const diff = await this.gitApi.getCommitDiff(hash);
+    const diff = await this.gitApi.getCommitDiff(hash, parents);
     this.diffCache.set(hash, diff);
     return diff;
+  }
+
+  /** Holds history paging while a commit detail is being resolved. */
+  private waitForCommitDetails(): Promise<void> {
+    if (this.detailRequests === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.detailReleased.push(resolve);
+    });
+  }
+
+  private finishDetailRequest(): void {
+    this.detailRequests = Math.max(0, this.detailRequests - 1);
+    if (this.detailRequests > 0) {
+      return;
+    }
+    const waiters = this.detailReleased.splice(0);
+    for (const resolve of waiters) {
+      resolve();
+    }
   }
 
   /** Fetches commit metadata + changed files and posts them to the webview. */
@@ -457,33 +486,45 @@ export class GitLineDiffGraphPanel implements vscode.Disposable {
     if (panel === undefined) {
       return;
     }
-    const [commit, diff] = await Promise.all([
-      this.gitApi.getCommit(hash),
-      this.resolveDiff(hash),
-    ]);
+    const generation = this.loadGeneration;
+    this.detailRequests += 1;
+    try {
+      // Metadata for commits already on screen is in the log page. Avoid
+      // `getCommit`, which would queue behind background `git log` on the
+      // built-in Git extension.
+      const known = this.commits.find((commit) => commit.hash === hash);
+      const commit = known ?? await this.gitApi.getCommit(hash);
+      const diff = await this.resolveDiff(hash, commit?.parents);
 
-    const files: DetailFile[] = diff.files.map((file) => {
-      const path = file.relativePath;
-      const slash = path.lastIndexOf('/');
-      return {
-        path,
-        name: slash === -1 ? path : path.slice(slash + 1),
-        dir: slash === -1 ? '' : path.slice(0, slash),
+      if (this.panel !== panel || generation !== this.loadGeneration) {
+        return;
+      }
+
+      const files: DetailFile[] = diff.files.map((file) => {
+        const path = file.relativePath;
+        const slash = path.lastIndexOf('/');
+        return {
+          path,
+          name: slash === -1 ? path : path.slice(slash + 1),
+          dir: slash === -1 ? '' : path.slice(0, slash),
+        };
+      });
+
+      const payload: CommitDetailPayload = {
+        type: 'commitDetail',
+        hash,
+        short: hash.slice(0, 8),
+        parents: commit?.parents ?? [],
+        author: commit?.authorName ?? '',
+        email: commit?.authorEmail ?? '',
+        date: commit?.authorDate ? formatDateTime(commit.authorDate) : '',
+        message: commit?.message?.trim() ?? '',
+        files,
       };
-    });
-
-    const payload: CommitDetailPayload = {
-      type: 'commitDetail',
-      hash,
-      short: hash.slice(0, 8),
-      parents: commit?.parents ?? [],
-      author: commit?.authorName ?? '',
-      email: commit?.authorEmail ?? '',
-      date: commit?.authorDate ? formatDateTime(commit.authorDate) : '',
-      message: commit?.message?.trim() ?? '',
-      files,
-    };
-    void panel.webview.postMessage(payload);
+      void panel.webview.postMessage(payload);
+    } finally {
+      this.finishDetailRequest();
+    }
   }
 
   /** Checks out a branch badge double-clicked in the graph. */
@@ -789,6 +830,27 @@ function renderHtml(
     word-break: break-word;
   }
   .detail-loading { padding: 12px 14px; color: var(--vscode-descriptionForeground); }
+  .detail-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .detail-spinner {
+    box-sizing: border-box;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    border: 2px solid rgba(128, 128, 128, 0.45);
+    border-top-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+    border-radius: 50%;
+    animation: gld-spin 0.7s linear infinite;
+  }
+  @keyframes gld-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .detail-spinner { animation: none; }
+  }
   .detail-files .files-head {
     padding: 2px 14px 6px;
     color: var(--vscode-descriptionForeground);
@@ -845,7 +907,6 @@ function renderHtml(
   const ROW_H = 28, COL_W = 14, PAD = 12, R = 4;
   const PALETTE = ['#e8a33d','#4e94ce','#52b455','#c74e39','#9a7fd1','#3fb1b3','#d36ba6','#8aa650'];
   const colX = function (c) { return PAD + c * COL_W; };
-  const rowY = function (i) { return i * ROW_H + ROW_H / 2; };
 
   var graphNatural = PAD + Math.max(1, DATA.columns) * COL_W + PAD;
   var totalHeight = DATA.rows.length * ROW_H;
@@ -881,55 +942,136 @@ function renderHtml(
   var graphWrap = document.getElementById('graphWrap');
   var rowEls = [];
   var detailEls = [];
+  // Parallel to DATA.rows. Each entry holds the SVG nodes for that row so
+  // opening a commit can move lanes instead of rebuilding the whole graph.
+  var graphNodes = [];
+  var rowCenter = [];
+  var graphHeight = 0;
+  var svgNs = 'http://www.w3.org/2000/svg';
 
   // ---- Graph SVG ----
-  // Node/line vertical positions are measured from the actual row elements, so
-  // expanding a commit-detail panel (which pushes rows down) keeps the lanes
-  // aligned and lets a lane continue straight through the expanded gap.
-  function centerY(i) {
-    var el = rowEls[i];
-    return el ? el.offsetTop + ROW_H / 2 : rowY(i);
-  }
+  // Y positions are computed from row index plus the open detail's height.
+  // Reading offsetTop per line forces a layout of every row and freezes the
+  // webview once a large history has loaded.
   function isRowVisible(i) {
     return rowEls[i] && !rowEls[i].classList.contains('filtered-out');
   }
+  function recomputeCenters() {
+    rowCenter = new Array(DATA.rows.length);
+    var y = 0;
+    for (var i = 0; i < DATA.rows.length; i++) {
+      if (!isRowVisible(i)) {
+        rowCenter[i] = -1;
+        continue;
+      }
+      rowCenter[i] = y + ROW_H / 2;
+      y += ROW_H;
+      var detail = detailEls[i];
+      if (detail && detail.style.display === 'block') {
+        y += detail.offsetHeight;
+      }
+    }
+    graphHeight = y || totalHeight;
+  }
+  function pathD(i, line) {
+    var y1 = rowCenter[i - 1];
+    var y2 = rowCenter[i];
+    var x1 = colX(line.fromCol);
+    var x2 = colX(line.toCol);
+    var midY = (y1 + y2) / 2;
+    if (x1 === x2) {
+      return 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2;
+    }
+    return 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + midY + ' ' + x2 + ' ' + midY + ' ' + x2 + ' ' + y2;
+  }
+  function addPaths(svg, i) {
+    var paths = [];
+    if (!(isRowVisible(i) && i > 0 && isRowVisible(i - 1))) {
+      return paths;
+    }
+    var row = DATA.rows[i];
+    var anchor = svg.querySelector('circle');
+    for (var j = 0; j < row.lines.length; j++) {
+      var line = row.lines[j];
+      var path = document.createElementNS(svgNs, 'path');
+      path.setAttribute('d', pathD(i, line));
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', PALETTE[line.color % PALETTE.length]);
+      path.setAttribute('stroke-width', '2');
+      if (anchor) { svg.insertBefore(path, anchor); }
+      else { svg.appendChild(path); }
+      paths.push(path);
+    }
+    return paths;
+  }
+  function addCircle(svg, i) {
+    if (!isRowVisible(i)) { return null; }
+    var row = DATA.rows[i];
+    var circle = document.createElementNS(svgNs, 'circle');
+    circle.setAttribute('cx', String(colX(row.col)));
+    circle.setAttribute('cy', String(rowCenter[i]));
+    circle.setAttribute('r', String(R));
+    circle.setAttribute('fill', PALETTE[row.color % PALETTE.length]);
+    circle.setAttribute('stroke', 'var(--vscode-editor-background)');
+    circle.setAttribute('stroke-width', '1.5');
+    svg.appendChild(circle);
+    return circle;
+  }
+  function sizeGraph(svg) {
+    svg.setAttribute('width', String(graphNatural));
+    svg.setAttribute('height', String(graphHeight));
+    graphWrap.style.height = graphHeight + 'px';
+  }
   function drawGraph() {
-    var svgNs = 'http://www.w3.org/2000/svg';
+    recomputeCenters();
     var svg = document.getElementById('graph');
     while (svg.firstChild) { svg.removeChild(svg.firstChild); }
-    var h = rowsEl.offsetHeight || totalHeight;
-    svg.setAttribute('width', String(graphNatural));
-    svg.setAttribute('height', String(h));
-    graphWrap.style.height = h + 'px';
-    DATA.rows.forEach(function (row, i) {
-      if (!isRowVisible(i) || !isRowVisible(i - 1)) { return; }
-      for (var j = 0; j < row.lines.length; j++) {
-        var line = row.lines[j];
-        var x1 = colX(line.fromCol), y1 = centerY(i - 1);
-        var x2 = colX(line.toCol), y2 = centerY(i);
-        var midY = (y1 + y2) / 2;
-        var d = x1 === x2
-          ? 'M ' + x1 + ' ' + y1 + ' L ' + x2 + ' ' + y2
-          : 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + midY + ' ' + x2 + ' ' + midY + ' ' + x2 + ' ' + y2;
-        var path = document.createElementNS(svgNs, 'path');
-        path.setAttribute('d', d);
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', PALETTE[line.color % PALETTE.length]);
-        path.setAttribute('stroke-width', '2');
-        svg.appendChild(path);
+    sizeGraph(svg);
+    graphNodes = [];
+    var pathSets = [];
+    for (var i = 0; i < DATA.rows.length; i++) {
+      pathSets.push(addPaths(svg, i));
+    }
+    for (var n = 0; n < DATA.rows.length; n++) {
+      graphNodes.push({ circle: addCircle(svg, n), paths: pathSets[n] });
+    }
+  }
+  function positionGraph() {
+    if (graphNodes.length !== DATA.rows.length) {
+      drawGraph();
+      return;
+    }
+    recomputeCenters();
+    var svg = document.getElementById('graph');
+    sizeGraph(svg);
+    for (var i = 0; i < DATA.rows.length; i++) {
+      var node = graphNodes[i];
+      var row = DATA.rows[i];
+      if (node.circle) {
+        node.circle.setAttribute('cx', String(colX(row.col)));
+        node.circle.setAttribute('cy', String(rowCenter[i]));
       }
-    });
-    DATA.rows.forEach(function (row, i) {
-      if (!isRowVisible(i)) { return; }
-      var circle = document.createElementNS(svgNs, 'circle');
-      circle.setAttribute('cx', String(colX(row.col)));
-      circle.setAttribute('cy', String(centerY(i)));
-      circle.setAttribute('r', String(R));
-      circle.setAttribute('fill', PALETTE[row.color % PALETTE.length]);
-      circle.setAttribute('stroke', 'var(--vscode-editor-background)');
-      circle.setAttribute('stroke-width', '1.5');
-      svg.appendChild(circle);
-    });
+      for (var j = 0; j < node.paths.length; j++) {
+        node.paths[j].setAttribute('d', pathD(i, row.lines[j]));
+      }
+    }
+  }
+  function appendGraphRows(startIndex) {
+    if (graphNodes.length !== startIndex) {
+      drawGraph();
+      return;
+    }
+    recomputeCenters();
+    var svg = document.getElementById('graph');
+    sizeGraph(svg);
+    var pathSets = [];
+    for (var i = startIndex; i < DATA.rows.length; i++) {
+      pathSets.push(addPaths(svg, i));
+    }
+    for (var n = 0; n < pathSets.length; n++) {
+      var rowIndex = startIndex + n;
+      graphNodes.push({ circle: addCircle(svg, rowIndex), paths: pathSets[n] });
+    }
   }
 
   // ---- Layout application (widths + graph overlay position) ----
@@ -958,7 +1100,7 @@ function renderHtml(
   // height stays correct when a detail panel is expanded.
   window.addEventListener('resize', function () {
     applyLayout();
-    if (typeof drawGraph === 'function') { drawGraph(); }
+    if (typeof positionGraph === 'function') { positionGraph(); }
   });
 
   // ---- Cell content per column ----
@@ -1080,26 +1222,61 @@ function renderHtml(
   }
 
   // ---- Commit detail panel ----
+  function showLoadingDetail(d, row) {
+    d.textContent = '';
+    var inner = document.createElement('div');
+    inner.className = 'detail-inner';
+
+    var meta = document.createElement('div');
+    meta.className = 'detail-meta';
+    meta.appendChild(metaLine('Commit:', textSpan(row.hash, 'mono')));
+    if (row.author) { meta.appendChild(metaLine('Author:', textSpan(row.author))); }
+    if (row.date) { meta.appendChild(metaLine('Date:', textSpan(row.date))); }
+    if (row.subject) {
+      var preview = document.createElement('div');
+      preview.className = 'msg';
+      preview.textContent = row.subject;
+      meta.appendChild(preview);
+    }
+    var status = document.createElement('div');
+    status.className = 'detail-status';
+    status.setAttribute('role', 'status');
+    var spinner = document.createElement('span');
+    spinner.className = 'detail-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    status.appendChild(spinner);
+    status.appendChild(document.createTextNode('Loading changes\\u2026'));
+    meta.appendChild(status);
+    inner.appendChild(meta);
+
+    var filesWrap = document.createElement('div');
+    filesWrap.className = 'detail-files';
+    var head = document.createElement('div');
+    head.className = 'files-head';
+    head.textContent = 'Files';
+    filesWrap.appendChild(head);
+    inner.appendChild(filesWrap);
+
+    d.appendChild(inner);
+  }
   function toggleDetail(i, row) {
     var d = detailEls[i];
     if (d.style.display === 'block') {
       d.style.display = 'none';
+      d.textContent = '';
       openIndex = -1;
-      drawGraph();
+      positionGraph();
       return;
     }
     if (openIndex !== -1 && detailEls[openIndex]) {
       detailEls[openIndex].style.display = 'none';
+      detailEls[openIndex].textContent = '';
     }
     openIndex = i;
-    d.textContent = '';
-    var loading = document.createElement('div');
-    loading.className = 'detail-loading';
-    loading.textContent = 'Loading changes\\u2026';
-    d.appendChild(loading);
+    showLoadingDetail(d, row);
     d.style.display = 'block';
-    drawGraph();
     vscode.postMessage({ type: 'requestCommitDetail', hash: row.hash });
+    positionGraph();
   }
 
   function metaLine(key, valueNode) {
@@ -1123,6 +1300,7 @@ function renderHtml(
     var i = hashToIndex[detail.hash];
     if (i === undefined) { return; }
     var d = detailEls[i];
+    if (d.style.display !== 'block') { return; }
     d.textContent = '';
 
     var inner = document.createElement('div');
@@ -1171,7 +1349,7 @@ function renderHtml(
     inner.appendChild(filesWrap);
 
     d.appendChild(inner);
-    drawGraph();
+    positionGraph();
   }
 
   window.addEventListener('message', function (e) {
@@ -1193,7 +1371,7 @@ function renderHtml(
     }
     return false;
   }
-  function applySearch() {
+  function applySearch(redraw) {
     var q = searchQuery.trim();
     var active = q.length > 0;
     var visible = 0;
@@ -1238,7 +1416,7 @@ function renderHtml(
       if (body) { body.style.display = DATA.rows.length ? '' : 'none'; }
       if (hdr) { hdr.style.display = DATA.rows.length ? '' : 'none'; }
     }
-    drawGraph();
+    if (redraw !== false) { drawGraph(); }
     updateLoadStatus();
   }
 
@@ -1405,6 +1583,8 @@ function renderHtml(
       DATA.rows = msg.rows;
       syncMetrics();
       appendRows(added, prevLen);
+      applySearch(false);
+      appendGraphRows(prevLen);
     } else if (!canAppend) {
       DATA.rows = msg.rows;
       syncMetrics();
@@ -1412,8 +1592,9 @@ function renderHtml(
     } else {
       DATA.rows = msg.rows;
       syncMetrics();
+      applySearch(false);
+      positionGraph();
     }
-    applySearch();
     applyLayout();
     window.scrollTo(0, scrollY);
     maybeRequestMore();

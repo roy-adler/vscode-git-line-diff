@@ -208,7 +208,7 @@
     "check-types": "tsc --noEmit",
     "watch": "node esbuild.js --watch",
     "lint": "eslint src",
-    "test": "tsc -p ./ && node --test out/commitPage.test.js",
+    "test": "tsc -p ./ && node --test out/commitPage.test.js out/diffNames.test.js",
     "package": "vsce package"
   },
   "overrides": {
