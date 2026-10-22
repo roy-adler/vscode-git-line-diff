@@ -959,6 +959,8 @@ function renderHtml(
   var detailAnim = null;
   var detailAnimGen = 0;
   var pendingGraphMsg = null;
+  // Set when a row is clicked while another commit is still closing.
+  var pendingOpen = null;
   var DETAIL_OPEN_MS = 180;
 
   // ---- Graph SVG ----
@@ -1036,7 +1038,7 @@ function renderHtml(
   }
   function drawGraph() {
     // A rebuild replaces the SVG nodes the animation is translating.
-    if (detailAnim) { stopDetailAnim(); }
+    if (detailAnim) { stopDetailAnim(false); }
     recomputeCenters();
     var svg = document.getElementById('graph');
     while (svg.firstChild) { svg.removeChild(svg.firstChild); }
@@ -1214,6 +1216,7 @@ function renderHtml(
     detailEls = [];
     hashToIndex = {};
     openIndex = -1;
+    pendingOpen = null;
     DATA.rows.forEach(function (row, i) {
       hashToIndex[row.hash] = i;
       var rowEl = document.createElement('div');
@@ -1247,27 +1250,81 @@ function renderHtml(
     while (tail.firstChild) { parent.appendChild(tail.firstChild); }
     parent.removeChild(tail);
   }
-  function stopDetailAnim() {
+  function stopDetailAnim(discardPending) {
     if (!detailAnim) { return; }
     var anim = detailAnim;
     detailAnim = null;
     anim.detail.style.height = '';
     anim.detail.style.overflow = '';
+    if (anim.inner) {
+      anim.inner.style.opacity = '';
+      anim.inner.style.animation = '';
+    }
     releaseTail(anim.tail);
+    if (anim.closing) {
+      anim.detail.style.display = 'none';
+      anim.detail.textContent = '';
+      if (openIndex === anim.index) { openIndex = -1; }
+    }
+    if (discardPending) { pendingOpen = null; }
   }
   function finishDetailAnim(gen) {
     if (!detailAnim || detailAnim.gen !== gen) { return; }
     var anim = detailAnim;
+    var closing = anim.closing;
     detailAnim = null;
     anim.detail.style.height = '';
     anim.detail.style.overflow = '';
+    if (anim.inner) {
+      anim.inner.style.opacity = '';
+      anim.inner.style.animation = '';
+    }
     releaseTail(anim.tail);
+    if (closing) {
+      anim.detail.style.display = 'none';
+      anim.detail.textContent = '';
+      if (openIndex === anim.index) { openIndex = -1; }
+    }
     positionGraph();
-    if (pendingGraphMsg) {
+    var next = closing ? pendingOpen : null;
+    pendingOpen = null;
+    if (next && detailEls[next.index]) {
+      beginOpenDetail(next.index, next.row);
+    }
+    if (!detailAnim && pendingGraphMsg) {
       var msg = pendingGraphMsg;
       pendingGraphMsg = null;
       applyGraphData(msg);
     }
+  }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function applyDetailFrame(anim, h) {
+    var dy = h - anim.target;
+    anim.detail.style.height = h + 'px';
+    if (anim.tail) { anim.tail.setAttribute('transform', 'translate(0 ' + dy + ')'); }
+    setJunction(anim.index, anim.centers, dy);
+    var graphH = Math.max(0, anim.fullHeight + dy);
+    anim.svg.setAttribute('height', String(graphH));
+    graphWrap.style.height = graphH + 'px';
+    if (anim.fade && anim.inner && anim.target) {
+      anim.inner.style.opacity = String(h / anim.target);
+    }
+  }
+  function runDetailAnim(anim) {
+    var gen = anim.gen;
+    function frame(now) {
+      if (!detailAnim || detailAnim.gen !== gen) { return; }
+      var t = Math.min(1, (now - anim.start) / DETAIL_OPEN_MS);
+      var eased = easeOutCubic(t);
+      var h = Math.round(anim.from + (anim.dest - anim.from) * eased);
+      applyDetailFrame(anim, h);
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        finishDetailAnim(gen);
+      }
+    }
+    requestAnimationFrame(frame);
   }
   // Moves lanes below the opened commit into one group so the open animation
   // can slide them down with a single transform.
@@ -1310,50 +1367,110 @@ function renderHtml(
     rowCenter[i - 1] = prevAbove;
     rowCenter[i] = prevBelow;
   }
-  function playDetailOpen(d, index) {
-    stopDetailAnim();
-    var inner = d.querySelector('.detail-inner');
+  function currentDetailHeight(d) {
+    var parsed = parseFloat(d.style.height);
+    if (!isNaN(parsed)) { return parsed; }
+    return d.offsetHeight;
+  }
+  // opening=true grows the card; opening=false plays that motion backwards.
+  function playDetailMotion(d, index, opening) {
     if (prefersReducedMotion()) {
+      stopDetailAnim(false);
+      if (!opening) {
+        d.style.display = 'none';
+        d.style.height = '';
+        d.style.overflow = '';
+        d.textContent = '';
+        if (openIndex === index) { openIndex = -1; }
+      }
       positionGraph();
+      var next = !opening ? pendingOpen : null;
+      pendingOpen = null;
+      if (next && detailEls[next.index]) { beginOpenDetail(next.index, next.row); }
+      if (!detailAnim && pendingGraphMsg) {
+        var msg = pendingGraphMsg;
+        pendingGraphMsg = null;
+        applyGraphData(msg);
+      }
       return;
     }
-    if (inner) { inner.classList.add('detail-enter'); }
-    positionGraph();
+
+    if (detailAnim && detailAnim.detail === d && detailAnim.index === index) {
+      if (!opening && detailAnim.closing) { return; }
+      var current = currentDetailHeight(d);
+      var live = d.querySelector('.detail-inner');
+      detailAnim.closing = !opening;
+      detailAnim.fade = true;
+      detailAnim.from = current;
+      detailAnim.dest = opening ? detailAnim.target : 0;
+      detailAnim.start = performance.now();
+      detailAnim.inner = live;
+      detailAnim.gen = ++detailAnimGen;
+      if (live) {
+        live.classList.remove('detail-enter');
+        live.style.animation = 'none';
+        live.style.opacity = String(detailAnim.target ? current / detailAnim.target : 1);
+      }
+      runDetailAnim(detailAnim);
+      return;
+    }
+
+    stopDetailAnim(false);
+    var inner = d.querySelector('.detail-inner');
+    if (opening && inner) {
+      inner.style.animation = '';
+      inner.style.opacity = '';
+      inner.classList.add('detail-enter');
+    }
+    if (opening) { positionGraph(); }
     var target = d.offsetHeight;
-    if (target < 2) { return; }
+    if (target < 2) {
+      if (!opening) {
+        d.style.display = 'none';
+        d.textContent = '';
+        if (openIndex === index) { openIndex = -1; }
+        var queued = pendingOpen;
+        pendingOpen = null;
+        if (queued && detailEls[queued.index]) { beginOpenDetail(queued.index, queued.row); }
+      }
+      return;
+    }
     var centers = rowCenter.slice();
     var fullHeight = graphHeight;
     var tail = collectTail(index);
     var svg = document.getElementById('graph');
     d.style.overflow = 'hidden';
-    d.style.height = '0px';
-    if (tail) { tail.setAttribute('transform', 'translate(0 ' + (-target) + ')'); }
-    setJunction(index, centers, -target);
-    svg.setAttribute('height', String(Math.max(0, fullHeight - target)));
-    graphWrap.style.height = Math.max(0, fullHeight - target) + 'px';
-
-    var gen = ++detailAnimGen;
-    detailAnim = { gen: gen, index: index, tail: tail, detail: d };
-    var start = performance.now();
-    function frame(now) {
-      if (!detailAnim || detailAnim.gen !== gen) { return; }
-      var t = Math.min(1, (now - start) / DETAIL_OPEN_MS);
-      var eased = 1 - Math.pow(1 - t, 3);
-      var h = Math.round(target * eased);
-      var dy = h - target;
-      d.style.height = h + 'px';
-      if (tail) { tail.setAttribute('transform', 'translate(0 ' + dy + ')'); }
-      setJunction(index, centers, dy);
-      var graphH = Math.max(0, fullHeight + dy);
-      svg.setAttribute('height', String(graphH));
-      graphWrap.style.height = graphH + 'px';
-      if (t < 1) {
-        requestAnimationFrame(frame);
-      } else {
-        finishDetailAnim(gen);
+    if (opening) {
+      d.style.height = '0px';
+      if (tail) { tail.setAttribute('transform', 'translate(0 ' + (-target) + ')'); }
+      setJunction(index, centers, -target);
+      svg.setAttribute('height', String(Math.max(0, fullHeight - target)));
+      graphWrap.style.height = Math.max(0, fullHeight - target) + 'px';
+    } else {
+      d.style.height = target + 'px';
+      if (inner) {
+        inner.classList.remove('detail-enter');
+        inner.style.animation = 'none';
+        inner.style.opacity = '1';
       }
     }
-    requestAnimationFrame(frame);
+    detailAnim = {
+      gen: ++detailAnimGen,
+      index: index,
+      tail: tail,
+      detail: d,
+      inner: inner,
+      target: target,
+      centers: centers,
+      fullHeight: fullHeight,
+      svg: svg,
+      from: opening ? 0 : target,
+      dest: opening ? target : 0,
+      start: performance.now(),
+      closing: !opening,
+      fade: !opening
+    };
+    runDetailAnim(detailAnim);
   }
   function showLoadingDetail(d, row) {
     d.textContent = '';
@@ -1392,26 +1509,31 @@ function renderHtml(
 
     d.appendChild(inner);
   }
-  function toggleDetail(i, row) {
+  function beginOpenDetail(i, row) {
     var d = detailEls[i];
-    if (d.style.display === 'block') {
-      stopDetailAnim();
-      d.style.display = 'none';
-      d.textContent = '';
-      openIndex = -1;
-      positionGraph();
-      return;
-    }
-    stopDetailAnim();
-    if (openIndex !== -1 && detailEls[openIndex]) {
-      detailEls[openIndex].style.display = 'none';
-      detailEls[openIndex].textContent = '';
-    }
+    if (!d) { return; }
     openIndex = i;
     showLoadingDetail(d, row);
     d.style.display = 'block';
     vscode.postMessage({ type: 'requestCommitDetail', hash: row.hash });
-    playDetailOpen(d, i);
+    playDetailMotion(d, i, true);
+  }
+  function toggleDetail(i, row) {
+    var d = detailEls[i];
+    var active = openIndex === i && (d.style.display === 'block' || (detailAnim && detailAnim.index === i));
+    if (active) {
+      pendingOpen = null;
+      var reopen = detailAnim && detailAnim.index === i && detailAnim.closing;
+      playDetailMotion(d, i, !!reopen);
+      return;
+    }
+    if (openIndex !== -1 && detailEls[openIndex] && detailEls[openIndex].style.display === 'block') {
+      pendingOpen = { index: i, row: row };
+      playDetailMotion(detailEls[openIndex], openIndex, false);
+      return;
+    }
+    pendingOpen = null;
+    beginOpenDetail(i, row);
   }
 
   function metaLine(key, valueNode) {
@@ -1436,6 +1558,7 @@ function renderHtml(
     if (i === undefined) { return; }
     var d = detailEls[i];
     if (d.style.display !== 'block') { return; }
+    if (detailAnim && detailAnim.index === i && detailAnim.closing) { return; }
     d.textContent = '';
 
     var inner = document.createElement('div');
