@@ -847,9 +847,15 @@ function renderHtml(
     border-radius: 50%;
     animation: gld-spin 0.7s linear infinite;
   }
+  .detail-enter { animation: gld-detail-in 180ms ease-out; }
   @keyframes gld-spin { to { transform: rotate(360deg); } }
+  @keyframes gld-detail-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
   @media (prefers-reduced-motion: reduce) {
     .detail-spinner { animation: none; }
+    .detail-enter { animation: none; }
   }
   .detail-files .files-head {
     padding: 2px 14px 6px;
@@ -948,6 +954,12 @@ function renderHtml(
   var rowCenter = [];
   var graphHeight = 0;
   var svgNs = 'http://www.w3.org/2000/svg';
+  // Commit-panel open animation. The tail group holds every lane below the
+  // opened row so each frame is one transform instead of a full redraw.
+  var detailAnim = null;
+  var detailAnimGen = 0;
+  var pendingGraphMsg = null;
+  var DETAIL_OPEN_MS = 180;
 
   // ---- Graph SVG ----
   // Y positions are computed from row index plus the open detail's height.
@@ -1023,6 +1035,8 @@ function renderHtml(
     graphWrap.style.height = graphHeight + 'px';
   }
   function drawGraph() {
+    // A rebuild replaces the SVG nodes the animation is translating.
+    if (detailAnim) { stopDetailAnim(); }
     recomputeCenters();
     var svg = document.getElementById('graph');
     while (svg.firstChild) { svg.removeChild(svg.firstChild); }
@@ -1099,6 +1113,7 @@ function renderHtml(
   // flexible Description column reflows correctly. Also redraw the graph so its
   // height stays correct when a detail panel is expanded.
   window.addEventListener('resize', function () {
+    if (detailAnim) { return; }
     applyLayout();
     if (typeof positionGraph === 'function') { positionGraph(); }
   });
@@ -1222,6 +1237,124 @@ function renderHtml(
   }
 
   // ---- Commit detail panel ----
+  function prefersReducedMotion() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  function releaseTail(tail) {
+    if (!tail || !tail.parentNode) { return; }
+    tail.removeAttribute('transform');
+    var parent = tail.parentNode;
+    while (tail.firstChild) { parent.appendChild(tail.firstChild); }
+    parent.removeChild(tail);
+  }
+  function stopDetailAnim() {
+    if (!detailAnim) { return; }
+    var anim = detailAnim;
+    detailAnim = null;
+    anim.detail.style.height = '';
+    anim.detail.style.overflow = '';
+    releaseTail(anim.tail);
+  }
+  function finishDetailAnim(gen) {
+    if (!detailAnim || detailAnim.gen !== gen) { return; }
+    var anim = detailAnim;
+    detailAnim = null;
+    anim.detail.style.height = '';
+    anim.detail.style.overflow = '';
+    releaseTail(anim.tail);
+    positionGraph();
+    if (pendingGraphMsg) {
+      var msg = pendingGraphMsg;
+      pendingGraphMsg = null;
+      applyGraphData(msg);
+    }
+  }
+  // Moves lanes below the opened commit into one group so the open animation
+  // can slide them down with a single transform.
+  function collectTail(fromIndex) {
+    var svg = document.getElementById('graph');
+    var g = document.createElementNS(svgNs, 'g');
+    var moved = false;
+    var i;
+    for (i = fromIndex + 2; i < graphNodes.length; i++) {
+      var paths = graphNodes[i].paths;
+      for (var p = 0; p < paths.length; p++) {
+        g.appendChild(paths[p]);
+        moved = true;
+      }
+    }
+    for (i = fromIndex + 1; i < graphNodes.length; i++) {
+      if (graphNodes[i].circle) {
+        g.appendChild(graphNodes[i].circle);
+        moved = true;
+      }
+    }
+    if (!moved) { return null; }
+    svg.appendChild(g);
+    return g;
+  }
+  // The lane that enters the expanded gap keeps its top on the opened commit
+  // and drops its bottom with the rows underneath.
+  function setJunction(openIndex, centers, dy) {
+    var i = openIndex + 1;
+    if (i >= graphNodes.length || !DATA.rows[i]) { return; }
+    var prevAbove = rowCenter[i - 1];
+    var prevBelow = rowCenter[i];
+    rowCenter[i - 1] = centers[i - 1];
+    rowCenter[i] = centers[i] + dy;
+    var node = graphNodes[i];
+    var row = DATA.rows[i];
+    for (var j = 0; j < node.paths.length; j++) {
+      node.paths[j].setAttribute('d', pathD(i, row.lines[j]));
+    }
+    rowCenter[i - 1] = prevAbove;
+    rowCenter[i] = prevBelow;
+  }
+  function playDetailOpen(d, index) {
+    stopDetailAnim();
+    var inner = d.querySelector('.detail-inner');
+    if (prefersReducedMotion()) {
+      positionGraph();
+      return;
+    }
+    if (inner) { inner.classList.add('detail-enter'); }
+    positionGraph();
+    var target = d.offsetHeight;
+    if (target < 2) { return; }
+    var centers = rowCenter.slice();
+    var fullHeight = graphHeight;
+    var tail = collectTail(index);
+    var svg = document.getElementById('graph');
+    d.style.overflow = 'hidden';
+    d.style.height = '0px';
+    if (tail) { tail.setAttribute('transform', 'translate(0 ' + (-target) + ')'); }
+    setJunction(index, centers, -target);
+    svg.setAttribute('height', String(Math.max(0, fullHeight - target)));
+    graphWrap.style.height = Math.max(0, fullHeight - target) + 'px';
+
+    var gen = ++detailAnimGen;
+    detailAnim = { gen: gen, index: index, tail: tail, detail: d };
+    var start = performance.now();
+    function frame(now) {
+      if (!detailAnim || detailAnim.gen !== gen) { return; }
+      var t = Math.min(1, (now - start) / DETAIL_OPEN_MS);
+      var eased = 1 - Math.pow(1 - t, 3);
+      var h = Math.round(target * eased);
+      var dy = h - target;
+      d.style.height = h + 'px';
+      if (tail) { tail.setAttribute('transform', 'translate(0 ' + dy + ')'); }
+      setJunction(index, centers, dy);
+      var graphH = Math.max(0, fullHeight + dy);
+      svg.setAttribute('height', String(graphH));
+      graphWrap.style.height = graphH + 'px';
+      if (t < 1) {
+        requestAnimationFrame(frame);
+      } else {
+        finishDetailAnim(gen);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
   function showLoadingDetail(d, row) {
     d.textContent = '';
     var inner = document.createElement('div');
@@ -1262,12 +1395,14 @@ function renderHtml(
   function toggleDetail(i, row) {
     var d = detailEls[i];
     if (d.style.display === 'block') {
+      stopDetailAnim();
       d.style.display = 'none';
       d.textContent = '';
       openIndex = -1;
       positionGraph();
       return;
     }
+    stopDetailAnim();
     if (openIndex !== -1 && detailEls[openIndex]) {
       detailEls[openIndex].style.display = 'none';
       detailEls[openIndex].textContent = '';
@@ -1276,7 +1411,7 @@ function renderHtml(
     showLoadingDetail(d, row);
     d.style.display = 'block';
     vscode.postMessage({ type: 'requestCommitDetail', hash: row.hash });
-    positionGraph();
+    playDetailOpen(d, i);
   }
 
   function metaLine(key, valueNode) {
@@ -1349,6 +1484,7 @@ function renderHtml(
     inner.appendChild(filesWrap);
 
     d.appendChild(inner);
+    if (detailAnim && detailAnim.index === i) { return; }
     positionGraph();
   }
 
@@ -1569,6 +1705,10 @@ function renderHtml(
     }
   }
   function applyGraphData(msg) {
+    if (detailAnim) {
+      pendingGraphMsg = msg;
+      return;
+    }
     var prevLen = DATA.rows.length;
     var canAppend = prevLen > 0 && msg.rows.length >= prevLen;
     for (var i = 0; i < prevLen && canAppend; i++) {
